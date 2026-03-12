@@ -1,0 +1,71 @@
+# llms-full.txt for @codexstar/pi-agent-teams
+
+## Repository purpose
+
+`@codexstar/pi-agent-teams` is a Pi extension that brings Claude-style agent-team workflows to Pi: teammate spawning, shared task lists, mailbox messaging, hooks/quality gates, and optional isolated git worktrees.
+
+## Start here
+
+- README.md
+- docs/ARCHITECTURE.md
+- docs/COMPATIBILITY.md
+- SECURITY.md
+- SUPPORT.md
+- CONTRIBUTING.md
+- GOVERNANCE.md
+- MAINTAINERS.md
+- CHANGELOG.md
+
+## Important source files
+
+### Runtime entrypoints
+- extensions/teams/index.ts
+- extensions/teams/leader.ts
+- extensions/teams/worker.ts
+
+### Task / state model
+- extensions/teams/task-store.ts
+- extensions/teams/team-config.ts
+- extensions/teams/mailbox.ts
+- extensions/teams/event-log.ts
+- extensions/teams/heartbeat-lease.ts
+
+### Lifecycle / orchestration
+- extensions/teams/teammate-rpc.ts
+- extensions/teams/process-control.ts
+- extensions/teams/leader-lifecycle-commands.ts
+- extensions/teams/leader-teams-tool.ts
+- extensions/teams/worktree.ts
+
+### UX / controls
+- extensions/teams/teams-panel.ts
+- extensions/teams/teams-widget.ts
+- extensions/teams/leader-info-commands.ts
+- extensions/teams/leader-task-commands.ts
+
+### Policy / hooks
+- extensions/teams/hooks.ts
+- extensions/teams/model-policy.ts
+- extensions/teams/max-workers-policy.ts
+
+## Tests / verification
+
+Primary verification commands:
+
+- bun run typecheck
+- bun run lint
+- bun run smoke-test
+
+High-signal integrations:
+
+- bun run integration-rpc-ready-handshake-test
+- bun run integration-hooks-remediation-test
+- bun run integration-claim-test
+- node scripts/e2e-rpc-test.mjs
+
+## Operator notes
+
+- `/team env <name>` prints both POSIX and PowerShell startup instructions.
+- Windows launcher: `scripts/start-team-windows.ps1`
+- macOS/Linux tmux launcher: `scripts/start-tmux-team.sh`
+- GitHub community docs live at repo root and `.github/`.

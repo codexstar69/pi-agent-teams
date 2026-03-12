@@ -1,0 +1,27 @@
+# llms.txt for @codexstar/pi-agent-teams
+
+Project: @codexstar/pi-agent-teams
+Canonical repo: https://github.com/codexstar69/pi-agent-teams
+Package: https://www.npmjs.com/package/@codexstar/pi-agent-teams
+
+Recommended reading order for AI agents:
+
+1. README.md
+2. docs/ARCHITECTURE.md
+3. docs/COMPATIBILITY.md
+4. SECURITY.md
+5. CONTRIBUTING.md
+6. extensions/teams/README.md
+7. skills/agent-teams/SKILL.md
+
+Key runtime entrypoints:
+
+- extensions/teams/index.ts
+- extensions/teams/leader.ts
+- extensions/teams/worker.ts
+- extensions/teams/task-store.ts
+- extensions/teams/teammate-rpc.ts
+- extensions/teams/hooks.ts
+- extensions/teams/worktree.ts
+
+Use llms-full.txt for a richer repository map.

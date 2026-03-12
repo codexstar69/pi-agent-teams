@@ -1355,10 +1355,30 @@ console.log("\n11. docs/help drift guard");
 		assert(readme.includes("_styles"), "README mentions _styles directory");
 		assert(readme.includes("PowerShell (Windows)"), "README documents PowerShell worker env instructions");
 		assert(readme.includes("start-team-windows.ps1"), "README mentions Windows launcher script");
+		assert(readme.includes("docs/ARCHITECTURE.md"), "README links architecture doc");
+		assert(readme.includes("docs/COMPATIBILITY.md"), "README links compatibility doc");
+		assert(readme.includes("SECURITY.md"), "README links security policy");
+		assert(readme.includes("llms.txt"), "README links llms.txt");
 	}
 
 	const windowsLauncherPath = path.join(process.cwd(), "scripts", "start-team-windows.ps1");
 	assert(fs.existsSync(windowsLauncherPath), "Windows launcher script exists");
+	assert(fs.existsSync(path.join(process.cwd(), "SECURITY.md")), "SECURITY.md exists");
+	assert(fs.existsSync(path.join(process.cwd(), "SUPPORT.md")), "SUPPORT.md exists");
+	assert(fs.existsSync(path.join(process.cwd(), "CONTRIBUTING.md")), "CONTRIBUTING.md exists");
+	assert(fs.existsSync(path.join(process.cwd(), "CODE_OF_CONDUCT.md")), "CODE_OF_CONDUCT.md exists");
+	assert(fs.existsSync(path.join(process.cwd(), "GOVERNANCE.md")), "GOVERNANCE.md exists");
+	assert(fs.existsSync(path.join(process.cwd(), "MAINTAINERS.md")), "MAINTAINERS.md exists");
+	assert(fs.existsSync(path.join(process.cwd(), "CHANGELOG.md")), "CHANGELOG.md exists");
+	assert(fs.existsSync(path.join(process.cwd(), "llms.txt")), "llms.txt exists");
+	assert(fs.existsSync(path.join(process.cwd(), "llms-full.txt")), "llms-full.txt exists");
+	assert(fs.existsSync(path.join(process.cwd(), "docs", "ARCHITECTURE.md")), "ARCHITECTURE.md exists");
+	assert(fs.existsSync(path.join(process.cwd(), "docs", "COMPATIBILITY.md")), "COMPATIBILITY.md exists");
+	assert(fs.existsSync(path.join(process.cwd(), ".github", "CODEOWNERS")), "CODEOWNERS exists");
+	assert(fs.existsSync(path.join(process.cwd(), ".github", "PULL_REQUEST_TEMPLATE.md")), "PR template exists");
+	assert(fs.existsSync(path.join(process.cwd(), ".github", "ISSUE_TEMPLATE", "bug_report.yml")), "bug issue template exists");
+	assert(fs.existsSync(path.join(process.cwd(), ".github", "ISSUE_TEMPLATE", "feature_request.yml")), "feature issue template exists");
+	assert(fs.existsSync(path.join(process.cwd(), ".github", "dependabot.yml")), "Dependabot config exists");
 }
 
 // ── summary ──────────────────────────────────────────────────────────

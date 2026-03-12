@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report
+    url: https://github.com/codexstar69/pi-agent-teams/blob/codex/world-class-stability-hardening/SECURITY.md
+    about: Please use the security reporting process for vulnerabilities.
+  - name: Support
+    url: https://github.com/codexstar69/pi-agent-teams/blob/codex/world-class-stability-hardening/SUPPORT.md
+    about: Read support and troubleshooting guidance before filing.

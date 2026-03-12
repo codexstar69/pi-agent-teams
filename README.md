@@ -1,8 +1,24 @@
 # pi-agent-teams
 
+[![npm version](https://img.shields.io/npm/v/%40codexstar%2Fpi-agent-teams)](https://www.npmjs.com/package/@codexstar/pi-agent-teams)
+[![CI](https://github.com/codexstar69/pi-agent-teams/actions/workflows/ci.yml/badge.svg)](https://github.com/codexstar69/pi-agent-teams/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+
 An experimental [Pi](https://pi.dev) extension that brings [Claude Code agent teams](https://code.claude.com/docs/en/agent-teams) to Pi. Spawn teammates, share a task list, and coordinate work across multiple Pi sessions.
 
-> **Status:** MVP (command-driven + status widget). See [`docs/claude-parity.md`](docs/claude-parity.md) for the full roadmap.
+> **Status:** MVP with hardened runtime behavior, multi-OS verification, PowerShell/Windows support paths, and a maintained package surface. See [`docs/claude-parity.md`](docs/claude-parity.md) for roadmap context.
+
+## Project health
+
+- **Package:** [`@codexstar/pi-agent-teams`](https://www.npmjs.com/package/@codexstar/pi-agent-teams)
+- **Architecture:** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- **Compatibility:** [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md)
+- **Security policy:** [`SECURITY.md`](SECURITY.md)
+- **Support:** [`SUPPORT.md`](SUPPORT.md)
+- **Contributing:** [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- **Governance:** [`GOVERNANCE.md`](GOVERNANCE.md)
+- **Maintainers:** [`MAINTAINERS.md`](MAINTAINERS.md)
+- **AI discovery:** [`llms.txt`](llms.txt), [`llms-full.txt`](llms-full.txt)
 
 ## Features
 

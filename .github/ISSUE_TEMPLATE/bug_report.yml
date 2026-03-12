@@ -1,0 +1,49 @@
+name: Bug report
+description: Report a runtime bug or regression
+labels: [bug]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Minimal steps, commands, env vars, and inputs.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Windows
+        - Linux
+        - Other
+  - type: input
+    id: version
+    attributes:
+      label: Package version
+      placeholder: e.g. 0.4.0
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification already run
+      description: e.g. typecheck/lint/smoke/integration commands
