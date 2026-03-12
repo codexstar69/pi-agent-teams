@@ -2,6 +2,36 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 
+function trimOrUndefined(value: string | undefined): string | undefined {
+	if (value === undefined) return undefined;
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+export function getPiTestModelArgs(env: NodeJS.ProcessEnv = process.env): string[] {
+	const modelSpec = trimOrUndefined(env.PI_TEAMS_TEST_MODEL);
+	const providerOverride = trimOrUndefined(env.PI_TEAMS_TEST_PROVIDER);
+	const thinkingOverride = trimOrUndefined(env.PI_TEAMS_TEST_THINKING);
+	const args: string[] = [];
+
+	if (modelSpec) {
+		const slashIdx = modelSpec.indexOf("/");
+		if (slashIdx >= 0) {
+			const provider = trimOrUndefined(modelSpec.slice(0, slashIdx));
+			const modelId = trimOrUndefined(modelSpec.slice(slashIdx + 1));
+			if (provider && modelId) {
+				args.push("--provider", provider, "--model", modelId);
+			}
+		} else {
+			if (providerOverride) args.push("--provider", providerOverride);
+			args.push("--model", modelSpec);
+		}
+	}
+
+	if (thinkingOverride) args.push("--thinking", thinkingOverride);
+	return args;
+}
+
 export function sleep(ms: number): Promise<void> {
 	return new Promise((r) => setTimeout(r, ms));
 }
@@ -72,6 +102,11 @@ export function spawnTeamsWorkerRpc(opts: {
 	const out = fs.openSync(logPath, "a");
 	const err = fs.openSync(logPath, "a");
 
+	const mergedEnv = {
+		...process.env,
+		...(extraEnv ?? {}),
+	};
+
 	const args = [
 		"--mode",
 		"rpc",
@@ -79,6 +114,7 @@ export function spawnTeamsWorkerRpc(opts: {
 		sessionFile,
 		"--session-dir",
 		sessionsDir,
+		...getPiTestModelArgs(mergedEnv),
 		"--no-extensions",
 		"-e",
 		entryPath,
@@ -89,7 +125,7 @@ export function spawnTeamsWorkerRpc(opts: {
 	return spawn("pi", args, {
 		cwd,
 		env: {
-			...process.env,
+			...mergedEnv,
 			PI_TEAMS_WORKER: "1",
 			PI_TEAMS_TEAM_ID: teamId,
 			PI_TEAMS_TASK_LIST_ID: taskListId,
@@ -98,7 +134,6 @@ export function spawnTeamsWorkerRpc(opts: {
 			PI_TEAMS_STYLE: style,
 			PI_TEAMS_AUTO_CLAIM: autoClaim ? "1" : "0",
 			PI_TEAMS_PLAN_REQUIRED: planRequired ? "1" : "0",
-			...(extraEnv ?? {}),
 		},
 		stdio: ["ignore", out, err],
 	});

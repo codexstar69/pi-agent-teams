@@ -2,6 +2,12 @@
 
 All notable changes to this project should be documented in this file.
 
+## Unreleased
+
+- fixed the worker integration harness so spawned test teammates can use an explicit test model instead of silently falling back to the global default model
+- fixed the RPC ready-handshake integration test to load the teams extension and match the production spawn path
+- verified teammate execution against inherited custom models (including provider-prefixed custom model ids)
+
 ## 0.4.1
 
 - merged the hardened branch into `main`
