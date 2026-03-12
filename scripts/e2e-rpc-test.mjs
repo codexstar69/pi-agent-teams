@@ -186,7 +186,7 @@ async function run() {
 				try {
 					const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
 					const alice = cfg.members?.find((m) => m.name === "alice");
-					return alice?.meta?.sessionName === "pi agent teams - comrade alice";
+					return alice?.meta?.sessionName === "pi agent teams - teammate alice";
 				} catch {
 					return false;
 				}
@@ -218,29 +218,22 @@ async function run() {
 		// ---------------------------------------------------------------------
 		await send({ type: "prompt", message: "/team shutdown" });
 
-		// RPC mode nuance: prompt is fire-and-forget. Extension commands run async,
-		// but rpc-mode only checks the shutdownRequested flag after handling *another*
-		// input line. Keep sending cheap commands until the process exits.
-		const kickTimer = setInterval(() => {
-			try {
-				proc.stdin.write(JSON.stringify({ type: "get_state", id: `kick-${Date.now()}` }) + "\n");
-			} catch {
-				// ignore
-			}
-		}, 250);
+		await waitFor(
+			async () => {
+				try {
+					const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+					return Array.isArray(cfg.members) && cfg.members.every((m) => m.role !== "worker" || m.status === "offline");
+				} catch {
+					return false;
+				}
+			},
+			{ label: "all workers offline after /team shutdown", timeoutMs: 30_000, pollMs: 500 },
+		);
 
-		await new Promise((resolve, reject) => {
-			const timeout = setTimeout(() => {
-				reject(new Error(`Timeout waiting for pi to exit. stderr=${stderr}`));
-			}, 30_000);
-
-			proc.on("close", (code) => {
-				clearInterval(kickTimer);
-				clearTimeout(timeout);
-				if (code === 0) resolve();
-				else reject(new Error(`pi exited with code ${code}. stderr=${stderr}`));
-			});
-		});
+		const leaderStillAlive = await send({ type: "get_state" });
+		if (!leaderStillAlive?.data?.sessionId) {
+			throw new Error(`Leader did not respond after /team shutdown: ${JSON.stringify(leaderStillAlive)}`);
+		}
 
 		// Verify alice offline after shutdown
 		try {

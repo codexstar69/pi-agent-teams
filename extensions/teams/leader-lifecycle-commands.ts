@@ -176,8 +176,9 @@ export async function handleTeamCleanupCommand(opts: {
 	getTasks: () => TeamTask[];
 	renderWidget: () => void;
 	style: TeamsStyle;
+	suppressConfigBootstrap: (teamId: string) => void;
 }): Promise<void> {
-	const { ctx, rest, teamId, teammates, refreshTasks, getTasks, renderWidget, style } = opts;
+	const { ctx, rest, teamId, teammates, refreshTasks, getTasks, renderWidget, style, suppressConfigBootstrap } = opts;
 	const strings = getTeamsStrings(style);
 
 	const flags = rest.filter((a) => a.startsWith("--"));
@@ -244,6 +245,7 @@ export async function handleTeamCleanupCommand(opts: {
 		return;
 	}
 
+	suppressConfigBootstrap(teamId);
 	ctx.ui.notify(`Cleaned up team directory: ${teamDir}`, "warning");
 	await refreshTasks();
 	renderWidget();
@@ -376,11 +378,10 @@ export async function handleTeamShutdownCommand(opts: {
 	}
 
 	const manualWorkers = (cfg?.members ?? []).filter((m) => m.role === "worker" && m.status === "online");
+	const pendingManualShutdowns: string[] = [];
 	for (const m of manualWorkers) {
 		// If it's an RPC teammate we already stopped above, skip mailbox request.
 		if (teammates.has(m.name)) continue;
-		// If a manual worker still owns an in-progress task, don't force it offline in the UI.
-		if (inProgressOwners.has(m.name)) continue;
 
 		const requestId = randomUUID();
 		const ts = new Date().toISOString();
@@ -400,6 +401,13 @@ export async function handleTeamShutdownCommand(opts: {
 			// ignore mailbox errors
 		}
 
+		// Active manual workers should still receive the shutdown request, but we keep
+		// them visible until they actually acknowledge/stop.
+		if (inProgressOwners.has(m.name)) {
+			pendingManualShutdowns.push(m.name);
+			continue;
+		}
+
 		void setMemberStatus(teamDir, m.name, "offline", {
 			meta: { shutdownRequestedAt: ts, shutdownRequestId: requestId, stoppedReason: reason },
 		});
@@ -408,6 +416,12 @@ export async function handleTeamShutdownCommand(opts: {
 	renderWidget();
 	const members = `${strings.memberTitle.toLowerCase()}s`;
 	ctx.ui.notify(formatTeamsTemplate(strings.teamEndedAllStopped, { members, count: String(activeNames.size) }), "info");
+	if (pendingManualShutdowns.length > 0) {
+		ctx.ui.notify(
+			`Shutdown requested for active manual ${members}: ${pendingManualShutdowns.join(", ")}`,
+			"warning",
+		);
+	}
 }
 
 export async function handleTeamPruneCommand(opts: {

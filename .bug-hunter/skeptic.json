@@ -1,0 +1,20 @@
+[
+  {
+    "bugId": "BUG-10",
+    "response": "ACCEPT",
+    "analysisSummary": "Accepted. The stop() path cannot reach its SIGKILL escalation. The timer reads `this.proc` after it has been nulled, and even without that, Node's `ChildProcess.killed` only reports that a signal was delivered, not that the child exited.",
+    "counterEvidence": "Node child_process docs: `subprocess.killed` becomes true after `kill()` successfully sends a signal; it does not mean the process terminated."
+  },
+  {
+    "bugId": "BUG-11",
+    "response": "ACCEPT",
+    "analysisSummary": "Accepted. The cleanup command deletes the active team directory and then refreshes leader state through a code path that auto-bootstraps missing config.json back into existence. That directly defeats the cleanup operation.",
+    "counterEvidence": "leader.ts refreshTasks() recreates config.json with ensureTeamConfig() whenever loadTeamConfig() returns null."
+  },
+  {
+    "bugId": "BUG-12",
+    "response": "ACCEPT",
+    "analysisSummary": "Accepted. The manual-worker shutdown loop skips active in-progress owners before it writes the shutdown mailbox message, so those workers are not merely left online in the UI—they are never asked to shut down at all.",
+    "counterEvidence": "The `continue` on `inProgressOwners.has(m.name)` executes before the shutdown_request mailbox write."
+  }
+]

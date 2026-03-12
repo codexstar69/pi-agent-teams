@@ -97,6 +97,7 @@ export async function handleTeamCommand(opts: {
 	shellQuote: (v: string) => string;
 	getCurrentCtx: () => ExtensionContext | null;
 	stopAllTeammates: (ctx: ExtensionContext, reason: string) => Promise<void>;
+	suppressConfigBootstrap: (teamId: string) => void;
 }): Promise<void> {
 	const {
 		args,
@@ -121,6 +122,7 @@ export async function handleTeamCommand(opts: {
 		shellQuote,
 		getCurrentCtx,
 		stopAllTeammates,
+		suppressConfigBootstrap,
 	} = opts;
 
 	const style = getStyle();
@@ -209,6 +211,7 @@ export async function handleTeamCommand(opts: {
 				getTasks,
 				renderWidget,
 				style,
+				suppressConfigBootstrap,
 			});
 		},
 

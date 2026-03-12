@@ -125,6 +125,7 @@ export function runLeader(pi: ExtensionAPI): void {
 	let currentTeamId: string | null = null;
 	let tasks: TeamTask[] = [];
 	let teamConfig: TeamConfig | null = null;
+	const suppressedConfigBootstrapTeams = new Set<string>();
 	const pendingPlanApprovals = new Map<string, { requestId: string; name: string; taskId?: string }>();
 	// Task list namespace. By default we keep it aligned with the current session id.
 	// (Do NOT read PI_TEAMS_TASK_LIST_ID for the leader; that env var is intended for workers
@@ -445,15 +446,18 @@ export function runLeader(pi: ExtensionAPI): void {
 		const effectiveTaskListId = taskListId ?? currentTeamId;
 
 		const [nextTasks, cfg] = await Promise.all([listTasks(teamDir, effectiveTaskListId), loadTeamConfig(teamDir)]);
+		const bootstrapSuppressed = suppressedConfigBootstrapTeams.has(currentTeamId);
 		const nextConfig =
 			cfg ??
-			(await ensureTeamConfig(teamDir, {
-				teamId: currentTeamId,
-				taskListId: effectiveTaskListId,
-				leadName: "team-lead",
-				style,
-			}));
-		const nextStyle = nextConfig.style ?? style;
+			(bootstrapSuppressed
+				? null
+				: await ensureTeamConfig(teamDir, {
+					teamId: currentTeamId,
+					taskListId: effectiveTaskListId,
+					leadName: "team-lead",
+					style,
+				}));
+		const nextStyle = nextConfig?.style ?? style;
 		const nextStateKey = JSON.stringify({
 			tasks: nextTasks.map((task) => ({
 				id: task.id,
@@ -463,7 +467,7 @@ export function runLeader(pi: ExtensionAPI): void {
 				blockedBy: task.blockedBy,
 				blocks: task.blocks,
 			})),
-			members: nextConfig.members.map((member) => ({
+			members: (nextConfig?.members ?? []).map((member) => ({
 				name: member.name,
 				status: member.status,
 				lastSeenAt: member.lastSeenAt ?? null,
@@ -813,6 +817,7 @@ export function runLeader(pi: ExtensionAPI): void {
 		lastAttachClaimHeartbeatMs = 0;
 
 		// Claude-style: a persisted team config file.
+		suppressedConfigBootstrapTeams.delete(currentTeamId);
 		await ensureTeamConfig(getTeamDir(currentTeamId), {
 			teamId: currentTeamId,
 			taskListId: taskListId,
@@ -844,6 +849,7 @@ export function runLeader(pi: ExtensionAPI): void {
 		taskListId = currentTeamId;
 		lastAttachClaimHeartbeatMs = 0;
 
+		suppressedConfigBootstrapTeams.delete(currentTeamId);
 		await ensureTeamConfig(getTeamDir(currentTeamId), {
 			teamId: currentTeamId,
 			taskListId: taskListId,
@@ -1065,6 +1071,13 @@ export function runLeader(pi: ExtensionAPI): void {
 				shellQuote,
 				getCurrentCtx: () => currentCtx,
 				stopAllTeammates,
+				suppressConfigBootstrap: (teamId) => {
+					suppressedConfigBootstrapTeams.add(teamId);
+					if (currentTeamId === teamId) {
+						tasks = [];
+						teamConfig = null;
+					}
+				},
 			});
 		},
 	});

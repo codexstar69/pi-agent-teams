@@ -179,16 +179,29 @@ export class TeammateRpc {
 	}
 
 	async stop(): Promise<void> {
-		if (!this.proc) return;
+		const proc = this.proc;
+		if (!proc) return;
 		try {
 			await this.abort();
 		} catch {
 			// ignore
 		}
-		this.proc.kill("SIGTERM");
-		setTimeout(() => {
-			if (this.proc && !this.proc.killed) this.proc.kill("SIGKILL");
+		try {
+			proc.kill("SIGTERM");
+		} catch {
+			// ignore
+		}
+
+		const killTimer = setTimeout(() => {
+			if (proc.exitCode !== null || proc.signalCode !== null) return;
+			try {
+				proc.kill("SIGKILL");
+			} catch {
+				// ignore
+			}
 		}, 1000);
+		proc.once("close", () => clearTimeout(killTimer));
+
 		this.proc = null;
 		this.status = "stopped";
 	}
