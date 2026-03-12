@@ -49,7 +49,7 @@
     "@mariozechner/pi-agent-core": "^0.52.8",
     "@mariozechner/pi-ai": "^0.52.8",
     "@mariozechner/pi-coding-agent": "^0.52.8",
-    "@mariozechner/pi-tui": "^0.52.8",
+    "@mariozechner/pi-tui": "^0.57.1",
     "@sinclair/typebox": "^0.34.48",
     "eslint": "^9.39.2",
     "tsx": "^4.20.5",
