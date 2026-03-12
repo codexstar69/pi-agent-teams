@@ -268,6 +268,15 @@ export function registerTeamsTool(opts: {
 					};
 				}
 
+				// BUG-1 fix: reject assignment if task is blocked by unfinished dependencies.
+				const existingTask = await getTask(teamDir, effectiveTlId, taskId);
+				if (existingTask && existingTask.status !== "completed" && (await isTaskBlocked(teamDir, effectiveTlId, existingTask))) {
+					return {
+						content: [{ type: "text", text: `Task #${taskId} is blocked by unfinished dependencies and cannot be assigned yet.` }],
+						details: { action, taskId, assignee, blocked: true },
+					};
+				}
+
 				const updated = await updateTask(teamDir, effectiveTlId, taskId, (cur) => {
 					const metadata = { ...(cur.metadata ?? {}) };
 					metadata.reassignedAt = new Date().toISOString();

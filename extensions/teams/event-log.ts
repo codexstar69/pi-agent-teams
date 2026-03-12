@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { withLock } from "./fs-lock.js";
 
 export interface TeamEvent {
 	ts: string;
@@ -45,8 +46,15 @@ export function getTeamEventsLogPath(teamDir: string): string {
 
 export async function appendTeamEvent(teamDir: string, event: TeamEvent): Promise<void> {
 	const file = getTeamEventsLogPath(teamDir);
+	const lockPath = `${file}.lock`;
 	await ensureDir(path.dirname(file));
-	await fs.promises.appendFile(file, JSON.stringify(event) + "\n", "utf8");
+	await withLock(
+		lockPath,
+		async () => {
+			await fs.promises.appendFile(file, JSON.stringify(event) + "\n", "utf8");
+		},
+		{ label: "event-log:append" },
+	);
 }
 
 export async function readRecentTeamEvents(teamDir: string, opts: { limit?: number } = {}): Promise<TeamEvent[]> {

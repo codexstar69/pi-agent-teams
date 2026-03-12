@@ -480,11 +480,17 @@ export async function claimTask(
 	taskListId: string,
 	taskId: string,
 	agentName: string,
-	opts: { checkAgentBusy?: boolean; nowMs?: number; leaseDurationMs?: number } = {},
+	opts: { checkAgentBusy?: boolean; checkBlocked?: boolean; nowMs?: number; leaseDurationMs?: number } = {},
 ): Promise<TeamTask | null> {
 	if (opts.checkAgentBusy) {
 		const busy = await agentHasActiveTask(teamDir, taskListId, agentName);
 		if (busy) return null;
+	}
+
+	// BUG-1 fix: check dependency blocking before claiming.
+	if (opts.checkBlocked !== false) {
+		const task = await getTask(teamDir, taskListId, taskId);
+		if (task && (await isTaskBlocked(teamDir, taskListId, task))) return null;
 	}
 
 	const updated = await updateTask(teamDir, taskListId, taskId, (cur) => {
@@ -627,6 +633,31 @@ export async function unassignTasksForAgent(
 		});
 		if (updated) changed += 1;
 	}
+
+	// BUG-3 fix: second pass to catch tasks assigned during the first pass (TOCTOU gap).
+	const secondPass = await listTasks(teamDir, taskListId);
+	const firstPassIds = new Set(tasks.map((t) => t.id));
+	for (const t of secondPass) {
+		if (firstPassIds.has(t.id)) continue;
+		if (t.owner !== agentName) continue;
+		if (t.status === "completed") continue;
+		const updated = await updateTask(teamDir, taskListId, t.id, (cur) => {
+			if (cur.owner !== agentName) return cur;
+			if (cur.status === "completed") return cur;
+
+			const metadata = withoutTaskLeaseMetadata(cur.metadata) ?? {};
+			if (reason) metadata.unassignedReason = reason;
+			metadata.unassignedAt = new Date().toISOString();
+			return {
+				...cur,
+				owner: undefined,
+				status: "pending",
+				metadata,
+			};
+		});
+		if (updated) changed += 1;
+	}
+
 	return changed;
 }
 

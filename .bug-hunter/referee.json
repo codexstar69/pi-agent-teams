@@ -1,0 +1,44 @@
+[
+  {
+    "bugId": "BUG-1",
+    "verdict": "REAL BUG",
+    "severity": "Medium",
+    "confidence": 88,
+    "reasoning": "Verified: claimTask() is a public export that skips isTaskBlocked(). The worker's maybeStartNextWork checks blocked status before calling startAssignedTask, but the teams tool task_assign action uses updateTask directly to set owner without any blocked check either. A blocked task can be assigned and started via the tool or panel. claimNextAvailableTask is safe, but direct claim paths are not."
+  },
+  {
+    "bugId": "BUG-2",
+    "verdict": "REAL BUG",
+    "severity": "Low",
+    "confidence": 78,
+    "reasoning": "Verified: appendFile without locking can produce interleaved JSONL lines under concurrent writes. However, readRecentTeamEvents already gracefully skips malformed lines, so the impact is silent event loss rather than a crash. Downgraded from Medium to Low because the event log is explicitly best-effort (the catch block in appendTaskEvent swallows errors) and no runtime behavior depends on event log completeness."
+  },
+  {
+    "bugId": "BUG-3",
+    "verdict": "REAL BUG",
+    "severity": "Low",
+    "confidence": 72,
+    "reasoning": "Verified: the TOCTOU gap exists. However, the window is narrow (between listTasks and the per-task updateTask calls), and the lease recovery system (PR5) provides a safety net — any orphaned in_progress task with a stale owner will eventually be recovered. The practical impact is a temporarily stuck task, not permanent data corruption."
+  },
+  {
+    "bugId": "BUG-4",
+    "verdict": "REAL BUG",
+    "severity": "Medium",
+    "confidence": 75,
+    "reasoning": "Verified: the catch block at line 208 swallows all errors including non-transient ones. With adaptive polling disabled (default), the worker spins at 450ms intervals consuming CPU. With adaptive polling enabled, the idle backoff would slow it down but the worker still never surfaces the error. The fix is straightforward: add an error counter and either log or notify after N consecutive failures."
+  },
+  {
+    "bugId": "BUG-5",
+    "verdict": "REAL BUG",
+    "severity": "Low",
+    "confidence": 82,
+    "reasoning": "Verified: if writeFileSync fails after openSync('wx'), the lock file is empty. readLockMetadata returns null, so dead-owner detection is bypassed. The lock is still reclaimable via stale timeout (60s default), so this is a degraded-recovery-speed issue, not a deadlock. Downgraded from Medium to Low because the stale timeout safety net always works."
+  },
+  {
+    "bugId": "BUG-6",
+    "verdict": "NOT A BUG",
+    "severity": "Low",
+    "confidence": 68,
+    "reasoning": "Dismissed: the double-recovery scenario requires two leader sessions attached to the same team, which is already guarded by the attach claim system (team-attach-claim.ts). The second leader would lose its claim and detach. Even if both somehow ran simultaneously, recoverLeasedTaskIfStale re-checks status under lock, making the second call a no-op. The spurious notification is cosmetic and the precondition is effectively unreachable."
+  }
+]

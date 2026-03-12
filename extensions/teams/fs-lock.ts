@@ -89,7 +89,16 @@ export async function withLock<T>(lockFilePath: string, fn: () => Promise<T>, op
 				createdAt: new Date().toISOString(),
 				label: opts.label,
 			};
-			fs.writeFileSync(fd, JSON.stringify(payload));
+			try {
+				fs.writeFileSync(fd, JSON.stringify(payload));
+			} catch (writeErr) {
+				// BUG-5 fix: if metadata write fails, close and remove the empty lock file
+				// so dead-owner detection still works for other processes.
+				try { fs.closeSync(fd); } catch { /* ignore */ }
+				fd = null;
+				try { fs.unlinkSync(lockFilePath); } catch { /* ignore */ }
+				throw writeErr;
+			}
 		} catch (err: unknown) {
 			if (!isErrnoException(err) || err.code !== "EEXIST") throw err;
 

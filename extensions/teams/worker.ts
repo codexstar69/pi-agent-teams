@@ -197,6 +197,8 @@ export function runWorker(pi: ExtensionAPI): void {
 	let heartbeatTimer: NodeJS.Timeout | null = null;
 	let heartbeatInFlight = false;
 	let pollIdleStreak = 0;
+	let pollErrorStreak = 0;
+	const MAX_POLL_ERROR_STREAK = 5;
 	let pendingTaskAssignments: string[] = [];
 	let pendingDmTexts: string[] = [];
 	let pollAbort = false;
@@ -281,6 +283,7 @@ export function runWorker(pi: ExtensionAPI): void {
 					popUnreadMessages(teamDir, taskListId, agentName),
 				]);
 				hasInboxActivity = teamMsgs.length > 0 || taskMsgs.length > 0;
+				pollErrorStreak = 0; // reset on successful read
 
 				for (const m of [...taskMsgs, ...teamMsgs]) {
 					const shutdown = isShutdownRequestMessage(m.text);
@@ -413,16 +416,23 @@ export function runWorker(pi: ExtensionAPI): void {
 				hasPendingWork = pendingTaskAssignments.length > 0 || pendingDmTexts.length > 0;
 				hasRunningWork = currentTaskId !== null || isStreaming;
 			} catch {
-				// ignore polling errors
+				// BUG-4 fix: track consecutive poll errors and back off.
+				pollErrorStreak += 1;
+				if (pollErrorStreak >= MAX_POLL_ERROR_STREAK) {
+					void publishHeartbeat("online", { pollErrorStreak, pollErrorState: "degraded" });
+				}
 			}
 
-			const delayMs = getWorkerPollDelayMs({
+			const errorBackoffMs = pollErrorStreak >= MAX_POLL_ERROR_STREAK
+				? Math.min(10_000, 1_000 * Math.pow(2, Math.min(pollErrorStreak - MAX_POLL_ERROR_STREAK, 4)))
+				: 0;
+			const delayMs = Math.max(errorBackoffMs, getWorkerPollDelayMs({
 				env: process.env,
 				idleStreak: pollIdleStreak,
 				hasInboxActivity,
 				hasPendingWork,
 				hasRunningWork,
-			});
+			}));
 			pollIdleStreak = hasInboxActivity || hasPendingWork || hasRunningWork ? 0 : pollIdleStreak + 1;
 			await sleep(delayMs);
 		}
