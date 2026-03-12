@@ -45,13 +45,13 @@
     "start-team:windows": "powershell -ExecutionPolicy Bypass -File scripts/start-team-windows.ps1"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.2",
-    "@mariozechner/pi-agent-core": "^0.52.8",
-    "@mariozechner/pi-ai": "^0.52.8",
-    "@mariozechner/pi-coding-agent": "^0.52.8",
-    "@mariozechner/pi-tui": "^0.52.8",
+    "@eslint/js": "^10.0.1",
+    "@mariozechner/pi-agent-core": "^0.57.1",
+    "@mariozechner/pi-ai": "^0.57.1",
+    "@mariozechner/pi-coding-agent": "^0.57.1",
+    "@mariozechner/pi-tui": "^0.57.1",
     "@sinclair/typebox": "^0.34.48",
-    "eslint": "^9.39.2",
+    "eslint": "^10.0.3",
     "tsx": "^4.20.5",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.54.0"

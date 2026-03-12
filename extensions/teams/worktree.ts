@@ -219,13 +219,17 @@ export async function inspectGitWorktree(worktreePath: string): Promise<GitWorkt
 	const repoRoot = await resolveGitRepoRoot(worktreeAbs);
 	if (!repoRoot) return null;
 
-	let entries: GitWorktreeEntry[] = [];
-	try {
-		entries = parseGitWorktreeListPorcelain((await execGit(["worktree", "list", "--porcelain"], { cwd: repoRoot })).stdout).map((entry) => ({
-			...entry,
-			worktreePath: normalizeFsPath(entry.worktreePath),
-		}));
-	} catch {
+	const entries = await (async (): Promise<GitWorktreeEntry[] | null> => {
+		try {
+			return parseGitWorktreeListPorcelain((await execGit(["worktree", "list", "--porcelain"], { cwd: repoRoot })).stdout).map((entry) => ({
+				...entry,
+				worktreePath: normalizeFsPath(entry.worktreePath),
+			}));
+		} catch {
+			return null;
+		}
+	})();
+	if (entries === null) {
 		return {
 			repoRoot,
 			worktreePath: worktreeAbs,
@@ -239,13 +243,14 @@ export async function inspectGitWorktree(worktreePath: string): Promise<GitWorkt
 	}
 
 	const entry = entries.find((candidate) => candidate.worktreePath === worktreeAbs);
-	let dirty: boolean | null = null;
-	try {
-		const status = (await execGit(["status", "--porcelain"], { cwd: worktreeAbs })).stdout;
-		dirty = status.trim().length > 0;
-	} catch {
-		dirty = null;
-	}
+	const dirty = await (async (): Promise<boolean | null> => {
+		try {
+			const status = (await execGit(["status", "--porcelain"], { cwd: worktreeAbs })).stdout;
+			return status.trim().length > 0;
+		} catch {
+			return null;
+		}
+	})();
 
 	return {
 		repoRoot,
@@ -309,15 +314,16 @@ export async function removeGitWorktree(worktreePath: string): Promise<GitWorktr
 
 export async function cleanupManagedWorktrees(teamDir: string): Promise<ManagedWorktreeCleanupResult> {
 	const worktreesDir = path.join(teamDir, "worktrees");
-	let entries: fs.Dirent[] = [];
-	try {
-		entries = await fs.promises.readdir(worktreesDir, { withFileTypes: true });
-	} catch (err: unknown) {
-		if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
-			return { results: [] };
+	const entries = await (async (): Promise<fs.Dirent[]> => {
+		try {
+			return await fs.promises.readdir(worktreesDir, { withFileTypes: true });
+		} catch (err: unknown) {
+			if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
+				return [];
+			}
+			throw err;
 		}
-		throw err;
-	}
+	})();
 
 	const results: GitWorktreeCleanupResult[] = [];
 	for (const entry of entries) {

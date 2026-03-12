@@ -182,7 +182,7 @@ export class TeammateRpc {
 			const proc = this.proc;
 			if (proc) scheduleProcessTermination(proc);
 			this.proc = null;
-			throw new Error(`Teammate RPC ready handshake failed for ${this.name}: ${this.lastError}`);
+			throw new Error(`Teammate RPC ready handshake failed for ${this.name}: ${this.lastError}`, { cause: err });
 		}
 	}
 

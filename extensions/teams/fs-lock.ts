@@ -124,7 +124,7 @@ export async function withLock<T>(lockFilePath: string, fn: () => Promise<T>, op
 
 			const elapsedMs = Date.now() - start;
 			if (elapsedMs > timeoutMs) {
-				throw new Error(formatLockDiagnostics(lockFilePath, metadata, lockAgeMs));
+				throw new Error(formatLockDiagnostics(lockFilePath, metadata, lockAgeMs), { cause: err });
 			}
 
 			attempt += 1;
