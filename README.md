@@ -6,7 +6,7 @@
 
 An experimental [Pi](https://pi.dev) extension that brings [Claude Code agent teams](https://code.claude.com/docs/en/agent-teams) to Pi. Spawn teammates, share a task list, and coordinate work across multiple Pi sessions.
 
-![pi-agent-teams product overview](docs/assets/github-hero-triptych.png)
+![pi-agent-teams dark product banner](docs/assets/banner-dark-glass.png)
 
 > **Status:** MVP with hardened runtime behavior, multi-OS verification, PowerShell/Windows support paths, and a maintained package surface. See [`docs/claude-parity.md`](docs/claude-parity.md) for roadmap context.
 
@@ -38,6 +38,8 @@ Additional Pi-specific capabilities:
 - **Git worktrees** — optionally give each teammate its own worktree so they work on isolated branches without conflicting edits.
 - **Session branching** — clone the leader's conversation context into a teammate so it starts with full awareness of the work so far, instead of from scratch.
 - **Hooks / quality gates** — optional leader-side hooks on idle / task completion to run scripts (opt-in).
+
+![pi-agent-teams system diagram](docs/assets/banner-editorial-diagram.png)
 
 ## UI style (terminology + naming)
 
@@ -109,6 +111,8 @@ The fastest way to get going is `/swarm`:
 /swarm build the auth module               # agent spawns a team and coordinates the work
 /swarm                                     # agent asks you what to do, then swarms on it
 ```
+
+![pi-agent-teams feature overview](docs/assets/banner-bento-enterprise.png)
 
 Or drive it manually:
 
