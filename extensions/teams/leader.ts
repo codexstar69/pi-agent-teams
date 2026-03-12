@@ -6,7 +6,7 @@ import { SessionManager } from "@mariozechner/pi-coding-agent";
 import { writeToMailbox } from "./mailbox.js";
 import { sanitizeName } from "./names.js";
 import { TEAM_MAILBOX_NS, taskAssignmentPayload } from "./protocol.js";
-import { createTask, listTasks, recoverLeasedTaskIfStale, unassignTasksForAgent, updateTask, type TeamTask } from "./task-store.js";
+import { createTask, getTask, isTaskBlocked, listTasks, recoverLeasedTaskIfStale, unassignTasksForAgent, updateTask, type TeamTask } from "./task-store.js";
 import { TeammateRpc } from "./teammate-rpc.js";
 import { ensureTeamConfig, loadTeamConfig, setMemberStatus, upsertMember, type TeamConfig } from "./team-config.js";
 import { getTeamDir } from "./paths.js";
@@ -954,6 +954,13 @@ export function runLeader(pi: ExtensionAPI): void {
 			async assignTask(taskId: string, ownerName: string) {
 				const owner = sanitizeName(ownerName);
 				if (!owner) return false;
+
+				// BUG-8 fix: reject assignment if task is blocked by unfinished dependencies.
+				const existingTask = await getTask(teamDir, effectiveTlId, taskId);
+				if (existingTask && existingTask.status !== "completed" && (await isTaskBlocked(teamDir, effectiveTlId, existingTask))) {
+					return false;
+				}
+
 				const updated = await updateTask(teamDir, effectiveTlId, taskId, (cur) => {
 					const metadata = { ...(cur.metadata ?? {}) };
 					metadata.reassignedAt = new Date().toISOString();

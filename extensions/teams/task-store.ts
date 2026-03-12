@@ -803,6 +803,7 @@ export async function claimNextAvailableTask(
 
 		const claimed = await claimTask(teamDir, taskListId, t.id, agentName, {
 			checkAgentBusy: false,
+			checkBlocked: false, // BUG-9 fix: already checked above, skip redundant I/O
 			nowMs: opts.nowMs,
 			leaseDurationMs: opts.leaseDurationMs,
 		});

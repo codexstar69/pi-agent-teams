@@ -207,6 +207,13 @@ export async function handleTeamTaskCommand(opts: {
 				return;
 			}
 
+			// BUG-7 fix: reject assignment if task is blocked by unfinished dependencies.
+			const existingTask = await getTask(teamDir, effectiveTlId, taskId);
+			if (existingTask && existingTask.status !== "completed" && (await isTaskBlocked(teamDir, effectiveTlId, existingTask))) {
+				ctx.ui.notify(`Task #${taskId} is blocked by unfinished dependencies and cannot be assigned yet.`, "error");
+				return;
+			}
+
 			const owner = sanitizeName(agent);
 			const updated = await updateTask(teamDir, effectiveTlId, taskId, (cur) => {
 				if (cur.status !== "completed") {

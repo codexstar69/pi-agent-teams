@@ -1,0 +1,47 @@
+[
+  {
+    "bugId": "BUG-7",
+    "severity": "Medium",
+    "category": "logic",
+    "file": "extensions/teams/leader-task-commands.ts",
+    "lines": "168-176",
+    "claim": "The /team task assign <id> <agent> slash command does not check isTaskBlocked() before assigning a task. The BUG-1 fix added blocked checks to claimTask() and the task_assign tool action, but this third assignment path was missed. A blocked task can be assigned and started via the slash command.",
+    "evidence": "leader-task-commands.ts:168-176 — updateTask sets owner and status=pending without any isTaskBlocked check. Compare with leader-teams-tool.ts task_assign action which now has the BUG-1 fix.",
+    "runtimeTrigger": "Leader runs /team task assign 3 agent1 where task #3 is blocked by unfinished task #2. The task is assigned and the worker receives a task_assignment message, starting work on a blocked task.",
+    "crossReferences": ["extensions/teams/leader-teams-tool.ts:261-280"],
+    "confidenceScore": 92,
+    "confidenceLabel": "high",
+    "stride": "N/A",
+    "cwe": "N/A"
+  },
+  {
+    "bugId": "BUG-8",
+    "severity": "Medium",
+    "category": "logic",
+    "file": "extensions/teams/leader.ts",
+    "lines": "assignTask callback in openInteractiveWidget",
+    "claim": "The interactive panel's assignTask callback does not check isTaskBlocked() before assigning a task via the UI. Same class as BUG-1/BUG-7 — a third unguarded assignment path. A blocked task can be reassigned through the panel.",
+    "evidence": "leader.ts openInteractiveWidget assignTask callback — calls updateTask to set owner without any blocked check. Compare with leader-teams-tool.ts task_assign which now checks isTaskBlocked.",
+    "runtimeTrigger": "Leader opens the panel (/tw), selects a blocked task, and reassigns it to a worker via the panel UI. The task is assigned despite having unfinished dependencies.",
+    "crossReferences": ["extensions/teams/leader-teams-tool.ts:261-280"],
+    "confidenceScore": 90,
+    "confidenceLabel": "high",
+    "stride": "N/A",
+    "cwe": "N/A"
+  },
+  {
+    "bugId": "BUG-9",
+    "severity": "Low",
+    "category": "logic",
+    "file": "extensions/teams/task-store.ts",
+    "lines": "claimNextAvailableTask calls claimTask",
+    "claim": "claimNextAvailableTask checks isTaskBlocked before calling claimTask, but claimTask now also checks isTaskBlocked by default (BUG-1 fix). This causes a redundant double-check of blocked status on every claim attempt, adding unnecessary filesystem reads. claimNextAvailableTask should pass checkBlocked: false to skip the redundant inner check.",
+    "evidence": "task-store.ts claimNextAvailableTask: calls isTaskBlocked at line ~780, then calls claimTask without checkBlocked: false, which triggers a second isTaskBlocked check inside claimTask.",
+    "runtimeTrigger": "Every auto-claim cycle reads dependency tasks twice — once in claimNextAvailableTask and once inside claimTask. With many tasks and dependencies, this doubles filesystem I/O on the hot path.",
+    "crossReferences": ["Single file"],
+    "confidenceScore": 95,
+    "confidenceLabel": "high",
+    "stride": "N/A",
+    "cwe": "N/A"
+  }
+]
