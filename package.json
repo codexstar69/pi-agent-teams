@@ -45,7 +45,7 @@
     "start-team:windows": "powershell -ExecutionPolicy Bypass -File scripts/start-team-windows.ps1"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.2",
+    "@eslint/js": "^10.0.1",
     "@mariozechner/pi-agent-core": "^0.52.8",
     "@mariozechner/pi-ai": "^0.52.8",
     "@mariozechner/pi-coding-agent": "^0.52.8",
