@@ -64,7 +64,7 @@ Example:
 **Option A — install from npm:**
 
 ```bash
-pi install npm:@codexstar69/pi-agent-teams
+pi install npm:@codexstar/pi-agent-teams
 ```
 
 **Option B — load directly (dev):**

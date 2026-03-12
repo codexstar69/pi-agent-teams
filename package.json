@@ -1,5 +1,5 @@
 {
-  "name": "@codexstar69/pi-agent-teams",
+  "name": "@codexstar/pi-agent-teams",
   "version": "0.4.0",
   "description": "Claude Code agent teams style workflow for Pi.",
   "license": "MIT",
