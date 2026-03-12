@@ -90,13 +90,14 @@ function isPidAlive(pid: number): boolean {
 async function listLockFilesRecursive(rootDir: string): Promise<string[]> {
 	const out: string[] = [];
 	const walk = async (dir: string) => {
-		let entries: fs.Dirent[] = [];
-		try {
-			entries = await fs.promises.readdir(dir, { withFileTypes: true });
-		} catch (err: unknown) {
-			if (isErrnoException(err) && err.code === "ENOENT") return;
-			throw err;
-		}
+		const entries = await (async (): Promise<fs.Dirent[]> => {
+			try {
+				return await fs.promises.readdir(dir, { withFileTypes: true });
+			} catch (err: unknown) {
+				if (isErrnoException(err) && err.code === "ENOENT") return [];
+				throw err;
+			}
+		})();
 		for (const entry of entries) {
 			const fullPath = path.join(dir, entry.name);
 			if (entry.isDirectory()) {

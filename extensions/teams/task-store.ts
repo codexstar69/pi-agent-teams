@@ -954,15 +954,16 @@ export async function clearTasks(
 		throw new Error(`Refusing to clear tasks outside teamDir. teamDir=${teamAbs} taskListDir=${listAbs}`);
 	}
 
-	let entries: fs.Dirent[] = [];
-	try {
-		entries = await fs.promises.readdir(taskListDir, { withFileTypes: true });
-	} catch (err: unknown) {
-		if (isErrnoException(err) && err.code === "ENOENT") {
-			return { mode, taskListId, taskListDir, deletedTaskIds: [], skippedTaskIds: [], errors: [] };
+	const entries = await (async (): Promise<fs.Dirent[]> => {
+		try {
+			return await fs.promises.readdir(taskListDir, { withFileTypes: true });
+		} catch (err: unknown) {
+			if (isErrnoException(err) && err.code === "ENOENT") {
+				return [];
+			}
+			throw err;
 		}
-		throw err;
-	}
+	})();
 
 	const deletedTaskIds: string[] = [];
 	const skippedTaskIds: string[] = [];

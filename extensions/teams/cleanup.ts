@@ -37,13 +37,14 @@ export function assertWorktreePathWithinTeamDir(teamDir: string, worktreePath: s
 
 export async function listManagedWorktreePaths(teamDir: string): Promise<string[]> {
 	const worktreesDir = getTeamWorktreesDir(teamDir);
-	let entries: fs.Dirent[] = [];
-	try {
-		entries = await fs.promises.readdir(worktreesDir, { withFileTypes: true });
-	} catch (err: unknown) {
-		if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") return [];
-		throw err;
-	}
+	const entries = await (async (): Promise<fs.Dirent[]> => {
+		try {
+			return await fs.promises.readdir(worktreesDir, { withFileTypes: true });
+		} catch (err: unknown) {
+			if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") return [];
+			throw err;
+		}
+	})();
 
 	return entries
 		.filter((entry) => entry.isDirectory())
