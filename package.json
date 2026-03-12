@@ -1,9 +1,9 @@
 {
-  "name": "@tmustier/pi-agent-teams",
+  "name": "@codexstar69/pi-agent-teams",
   "version": "0.4.0",
   "description": "Claude Code agent teams style workflow for Pi.",
   "license": "MIT",
-  "author": "Thomas Mustier",
+  "author": "codexstar69",
   "private": false,
   "type": "module",
   "keywords": [
@@ -11,10 +11,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tmustier/pi-agent-teams.git"
+    "url": "git+https://github.com/codexstar69/pi-agent-teams.git"
   },
-  "bugs": "https://github.com/tmustier/pi-agent-teams/issues",
-  "homepage": "https://github.com/tmustier/pi-agent-teams",
+  "bugs": "https://github.com/codexstar69/pi-agent-teams/issues",
+  "homepage": "https://github.com/codexstar69/pi-agent-teams",
   "publishConfig": {
     "access": "public"
   },
