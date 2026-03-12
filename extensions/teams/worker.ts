@@ -14,6 +14,8 @@ import {
 	isShutdownRequestMessage,
 	isTaskAssignmentMessage,
 } from "./protocol.js";
+import { getWorkerPollDelayMs } from "./adaptive-polling.js";
+import { buildWorkerHeartbeatMeta, getWorkerHeartbeatConfig, readTaskLeaseMetadata, type WorkerHeartbeatPhase } from "./heartbeat-lease.js";
 import { getTeamDir } from "./paths.js";
 import { ensureTeamConfig, setMemberStatus, upsertMember } from "./team-config.js";
 import {
@@ -21,14 +23,21 @@ import {
 	completeTask,
 	getTask,
 	isTaskBlocked,
+	markTaskRetryableFailure,
+	refreshTaskLeaseHeartbeat,
 	startAssignedTask,
 	unassignTasksForAgent,
-	updateTask,
 	type TeamTask,
 } from "./task-store.js";
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((r) => setTimeout(r, ms));
+}
+
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+	if (!value) return fallback;
+	const parsed = Number.parseInt(value, 10);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function teamDirFromEnv(): {
@@ -122,6 +131,11 @@ export function runWorker(pi: ExtensionAPI): void {
 	if (!env) return;
 
 	const { teamId, teamDir, taskListId, agentName, leadName, styleId, autoClaim } = env;
+	const retryBaseDelayMs = parsePositiveInt(process.env.PI_TEAMS_RETRY_BASE_DELAY_MS, 5_000);
+	const retryMaxAttempts = parsePositiveInt(process.env.PI_TEAMS_RETRY_MAX_ATTEMPTS, 3);
+	const heartbeatConfig = getWorkerHeartbeatConfig(process.env);
+	const heartbeatsEnabled = process.env.PI_TEAMS_HEARTBEATS === "1";
+	const taskLeasesEnabled = process.env.PI_TEAMS_TASK_LEASES === "1";
 
 	// Prefer persisted team config style (leader-controlled) over env default.
 	// This keeps manual workers consistent with the current team terminology.
@@ -180,6 +194,9 @@ export function runWorker(pi: ExtensionAPI): void {
 	let isStreaming = false;
 	let isDeciding = false;
 	let currentTaskId: string | null = null;
+	let heartbeatTimer: NodeJS.Timeout | null = null;
+	let heartbeatInFlight = false;
+	let pollIdleStreak = 0;
 	let pendingTaskAssignments: string[] = [];
 	let pendingDmTexts: string[] = [];
 	let pollAbort = false;
@@ -198,8 +215,63 @@ export function runWorker(pi: ExtensionAPI): void {
 	/** Tools that were active before plan-mode restriction, so we can restore them on approval. */
 	let prePlanTools: string[] | null = null;
 
+	const currentHeartbeatPhase = (): WorkerHeartbeatPhase => {
+		if (shutdownInProgress || pollAbort) return "shutdown";
+		if (planMode && currentTaskId && !planApproved) return "planning";
+		if (isStreaming || currentTaskId) return "streaming";
+		return "idle";
+	};
+
+	const publishHeartbeat = async (status: "online" | "offline" = "online", extraMeta?: Record<string, unknown>) => {
+		if (!heartbeatsEnabled) return;
+		if (heartbeatInFlight) return;
+		heartbeatInFlight = true;
+		try {
+			let leaseToken: string | undefined;
+			let leaseExpiresAt: string | undefined;
+			if (taskLeasesEnabled && currentTaskId && status === "online") {
+				const refreshedTask = await refreshTaskLeaseHeartbeat(teamDir, taskListId, currentTaskId, agentName, {
+					leaseDurationMs: heartbeatConfig.leaseDurationMs,
+				});
+				const lease = readTaskLeaseMetadata(refreshedTask?.metadata);
+				leaseToken = lease?.token;
+				leaseExpiresAt = lease?.expiresAt;
+			}
+			const meta = buildWorkerHeartbeatMeta({
+				phase: currentHeartbeatPhase(),
+				currentTaskId: currentTaskId ?? undefined,
+				leaseToken,
+				leaseExpiresAt,
+			});
+			await setMemberStatus(teamDir, agentName, status, {
+				lastSeenAt: meta.heartbeatAt,
+				meta: extraMeta ? { ...meta, ...extraMeta } : { ...meta },
+			});
+		} catch {
+			// ignore heartbeat failures
+		} finally {
+			heartbeatInFlight = false;
+		}
+	};
+
+	const stopHeartbeatLoop = () => {
+		if (heartbeatTimer) clearInterval(heartbeatTimer);
+		heartbeatTimer = null;
+	};
+
+	const startHeartbeatLoop = () => {
+		if (!heartbeatsEnabled) return;
+		stopHeartbeatLoop();
+		heartbeatTimer = setInterval(() => {
+			void publishHeartbeat();
+		}, heartbeatConfig.intervalMs);
+	};
+
 	const poll = async () => {
 		while (!pollAbort) {
+			let hasInboxActivity = false;
+			let hasPendingWork = false;
+			let hasRunningWork = false;
 			try {
 				// Two namespaces (Claude-style):
 				// - team namespace for DM/idle notifications
@@ -208,6 +280,7 @@ export function runWorker(pi: ExtensionAPI): void {
 					popUnreadMessages(teamDir, TEAM_MAILBOX_NS, agentName),
 					popUnreadMessages(teamDir, taskListId, agentName),
 				]);
+				hasInboxActivity = teamMsgs.length > 0 || taskMsgs.length > 0;
 
 				for (const m of [...taskMsgs, ...teamMsgs]) {
 					const shutdown = isShutdownRequestMessage(m.text);
@@ -235,6 +308,7 @@ export function runWorker(pi: ExtensionAPI): void {
 						// Idle — approve shutdown
 						shutdownInProgress = true;
 						pollAbort = true;
+						stopHeartbeatLoop();
 
 						await writeToMailbox(teamDir, TEAM_MAILBOX_NS, leadName, {
 							from: agentName,
@@ -252,6 +326,7 @@ export function runWorker(pi: ExtensionAPI): void {
 						} catch {
 							// ignore
 						}
+						await publishHeartbeat("offline", { offlineReason: "shutdown requested" });
 
 						try {
 							ctxRef?.abort();
@@ -335,12 +410,21 @@ export function runWorker(pi: ExtensionAPI): void {
 				}
 
 				if (!shutdownInProgress) await maybeStartNextWork();
+				hasPendingWork = pendingTaskAssignments.length > 0 || pendingDmTexts.length > 0;
+				hasRunningWork = currentTaskId !== null || isStreaming;
 			} catch {
 				// ignore polling errors
 			}
 
-			// Add a little jitter to avoid all workers polling/claiming in lock-step.
-			await sleep(350 + Math.floor(Math.random() * 200));
+			const delayMs = getWorkerPollDelayMs({
+				env: process.env,
+				idleStreak: pollIdleStreak,
+				hasInboxActivity,
+				hasPendingWork,
+				hasRunningWork,
+			});
+			pollIdleStreak = hasInboxActivity || hasPendingWork || hasRunningWork ? 0 : pollIdleStreak + 1;
+			await sleep(delayMs);
 		}
 	};
 
@@ -370,10 +454,15 @@ export function runWorker(pi: ExtensionAPI): void {
 				}
 
 				// Mark in_progress if needed
-				if (task.status === "pending") await startAssignedTask(teamDir, taskListId, taskId, agentName);
+				if (task.status === "pending") {
+					await startAssignedTask(teamDir, taskListId, taskId, agentName, {
+						leaseDurationMs: taskLeasesEnabled ? heartbeatConfig.leaseDurationMs : undefined,
+					});
+				}
 
 				currentTaskId = taskId;
 				isStreaming = true; // optimistic; agent_start will follow
+				void publishHeartbeat();
 				pi.sendUserMessage(buildTaskPrompt(style, agentName, task, planMode && !planApproved));
 				pendingTaskAssignments = [...requeue, ...pendingTaskAssignments];
 				return;
@@ -385,6 +474,7 @@ export function runWorker(pi: ExtensionAPI): void {
 				const text = pendingDmTexts.join("\n\n---\n\n");
 				pendingDmTexts = [];
 				isStreaming = true;
+				void publishHeartbeat();
 				pi.sendUserMessage([
 					{ type: "text", text: "You have received comrade message(s):" },
 					{ type: "text", text },
@@ -398,10 +488,14 @@ export function runWorker(pi: ExtensionAPI): void {
 				// and reduces lock contention when many workers become idle simultaneously.
 				await sleep(Math.floor(Math.random() * 250));
 
-				const claimed = await claimNextAvailableTask(teamDir, taskListId, agentName, { checkAgentBusy: true });
+				const claimed = await claimNextAvailableTask(teamDir, taskListId, agentName, {
+					checkAgentBusy: true,
+					leaseDurationMs: taskLeasesEnabled ? heartbeatConfig.leaseDurationMs : undefined,
+				});
 				if (claimed) {
 					currentTaskId = claimed.id;
 					isStreaming = true;
+					void publishHeartbeat();
 					pi.sendUserMessage(buildTaskPrompt(style, agentName, claimed, planMode && !planApproved));
 					return;
 				}
@@ -479,6 +573,10 @@ export function runWorker(pi: ExtensionAPI): void {
 			// ignore config errors
 		}
 
+		if (heartbeatsEnabled) {
+			await publishHeartbeat();
+			startHeartbeatLoop();
+		}
 		void poll();
 		await maybeStartNextWork();
 		// Claude-style: let the leader know we're idle even if no task was completed yet.
@@ -489,17 +587,15 @@ export function runWorker(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", async () => {
 		pollAbort = true;
+		stopHeartbeatLoop();
 		await cleanup("worker shutdown");
-		try {
-			await setMemberStatus(teamDir, agentName, "offline", { meta: { offlineReason: "worker shutdown" } });
-		} catch {
-			// ignore
-		}
+		if (heartbeatsEnabled) await publishHeartbeat("offline", { offlineReason: "worker shutdown" });
 		await sendIdleNotification(undefined, undefined, "worker shutdown");
 	});
 
 	pi.on("agent_start", async () => {
 		isStreaming = true;
+		if (heartbeatsEnabled) await publishHeartbeat();
 	});
 
 	pi.on("agent_end", async (event) => {
@@ -543,9 +639,9 @@ export function runWorker(pi: ExtensionAPI): void {
 				const aborted = abortedByRequest || trimmed.length === 0;
 
 				if (aborted) {
-					const ts = new Date().toISOString();
+					const nowMs = Date.now();
 					const extra: Record<string, unknown> = {
-						abortedAt: ts,
+						abortedAt: new Date(nowMs).toISOString(),
 						abortedBy: agentName,
 					};
 
@@ -557,18 +653,18 @@ export function runWorker(pi: ExtensionAPI): void {
 						extra.abortReason = "no assistant result";
 					}
 
-					await updateTask(teamDir, taskListId, taskId, (cur) => {
-						if (cur.owner !== agentName) return cur;
-						if (cur.status === "completed") return cur;
-
-						const metadata = { ...(cur.metadata ?? {}) };
-						Object.assign(metadata, extra);
-
-						// Reset to pending, but keep owner. This avoids immediate re-claim loops after an abort.
-						return { ...cur, status: "pending", metadata };
+					await markTaskRetryableFailure(teamDir, taskListId, taskId, agentName, {
+						reason: typeof extra.abortReason === "string" ? extra.abortReason : "task aborted",
+						partialResult: typeof extra.partialResult === "string" ? extra.partialResult : undefined,
+						failureKind: abortedByRequest ? "aborted" : "empty_result",
+						nowMs,
+						baseDelayMs: retryBaseDelayMs,
+						maxAttempts: retryMaxAttempts,
+						extraMetadata: extra,
 					});
 					completedTaskId = taskId;
 					completedStatus = "failed";
+					failureReason = typeof extra.abortReason === "string" ? extra.abortReason : undefined;
 				} else {
 					await completeTask(teamDir, taskListId, taskId, agentName, rawResult);
 					completedTaskId = taskId;
@@ -582,6 +678,7 @@ export function runWorker(pi: ExtensionAPI): void {
 		}
 
 		await maybeStartNextWork();
+		await publishHeartbeat();
 
 		// Only tell the leader we're idle if we truly didn't start more work.
 		if (!isStreaming && !currentTaskId) {
@@ -592,13 +689,10 @@ export function runWorker(pi: ExtensionAPI): void {
 	// Best-effort cleanup on SIGTERM (leader kill).
 	process.on("SIGTERM", () => {
 		pollAbort = true;
+		stopHeartbeatLoop();
 		void (async () => {
 			await cleanup("SIGTERM");
-			try {
-				await setMemberStatus(teamDir, agentName, "offline", { meta: { offlineReason: "SIGTERM" } });
-			} catch {
-				// ignore
-			}
+			if (heartbeatsEnabled) await publishHeartbeat("offline", { offlineReason: "SIGTERM" });
 			await sendIdleNotification(undefined, undefined, "SIGTERM");
 		})().finally(() => process.exit(0));
 	});

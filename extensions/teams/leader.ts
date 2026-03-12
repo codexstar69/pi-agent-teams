@@ -6,16 +6,20 @@ import { SessionManager } from "@mariozechner/pi-coding-agent";
 import { writeToMailbox } from "./mailbox.js";
 import { sanitizeName } from "./names.js";
 import { TEAM_MAILBOX_NS, taskAssignmentPayload } from "./protocol.js";
-import { createTask, listTasks, unassignTasksForAgent, updateTask, type TeamTask } from "./task-store.js";
+import { createTask, listTasks, recoverLeasedTaskIfStale, unassignTasksForAgent, updateTask, type TeamTask } from "./task-store.js";
 import { TeammateRpc } from "./teammate-rpc.js";
 import { ensureTeamConfig, loadTeamConfig, setMemberStatus, upsertMember, type TeamConfig } from "./team-config.js";
 import { getTeamDir } from "./paths.js";
 import { heartbeatTeamAttachClaim, releaseTeamAttachClaim } from "./team-attach-claim.js";
 import { ensureWorktreeCwd } from "./worktree.js";
 import { ActivityTracker, TranscriptTracker } from "./activity-tracker.js";
+import { getLeaderInboxPollDelayMs, getLeaderRefreshPollDelayMs } from "./adaptive-polling.js";
+import { createDebouncedTrigger } from "./debounce.js";
+import { getWorkerHeartbeatConfig, listStaleWorkerNames } from "./heartbeat-lease.js";
 import { openInteractiveWidget } from "./teams-panel.js";
 import { createTeamsWidget } from "./teams-widget.js";
 import { resolveTeammateModelSelection, formatProviderModel } from "./model-policy.js";
+import { evaluateMaxWorkersPolicy } from "./max-workers-policy.js";
 import { getTeamsStyleFromEnv, type TeamsStyle, formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
 import { pollLeaderInbox as pollLeaderInboxImpl } from "./leader-inbox.js";
 import {
@@ -50,6 +54,12 @@ function getTeamsExtensionEntryPath(): string | null {
 
 function shellQuote(v: string): string {
 	return "'" + v.replace(/'/g, `"'"'"'`) + "'";
+}
+
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+	if (!value) return fallback;
+	const parsed = Number.parseInt(value, 10);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function getTeamSessionsDir(teamDir: string): string {
@@ -126,15 +136,18 @@ export function runLeader(pi: ExtensionAPI): void {
 	let refreshInFlight = false;
 	let inboxInFlight = false;
 	let isStopping = false;
+	const heartbeatsEnabled = process.env.PI_TEAMS_HEARTBEATS === "1";
+	const taskLeaseRecoveryEnabled = process.env.PI_TEAMS_TASK_LEASE_RECOVERY === "1";
 	let delegateMode = process.env.PI_TEAMS_DELEGATE_MODE === "1";
 	let style: TeamsStyle = getTeamsStyleFromEnv();
 	let lastAttachClaimHeartbeatMs = 0;
 
 	const stopLoops = () => {
-		if (refreshTimer) clearInterval(refreshTimer);
-		if (inboxTimer) clearInterval(inboxTimer);
+		if (refreshTimer) clearTimeout(refreshTimer);
+		if (inboxTimer) clearTimeout(inboxTimer);
 		refreshTimer = null;
 		inboxTimer = null;
+		debouncedRenderWidget.cancel();
 	};
 
 	const releaseActiveAttachClaim = async (ctx: ExtensionContext): Promise<void> => {
@@ -413,14 +426,26 @@ export function runLeader(pi: ExtensionAPI): void {
 		getSessionTeamId: () => currentCtx?.sessionManager.getSessionId() ?? null,
 	});
 
-	const refreshTasks = async () => {
-		if (!currentCtx || !currentTeamId) return;
+	let lastRefreshStateKey = "";
+	let lastRefreshChanged = false;
+	const debouncedWidgetDelayMs = parsePositiveInt(process.env.PI_TEAMS_DEBOUNCED_WIDGET_MS, 120);
+	const debouncedWidgetEnabled = process.env.PI_TEAMS_DEBOUNCED_WIDGET === "1";
+	const renderWidgetNow = () => {
+		if (!currentCtx || widgetSuppressed) return;
+		currentCtx.ui.setWidget("pi-teams", widgetFactory);
+	};
+	const debouncedRenderWidget = createDebouncedTrigger(renderWidgetNow, debouncedWidgetDelayMs);
+
+	const refreshTasks = async (): Promise<void> => {
+		if (!currentCtx || !currentTeamId) {
+			lastRefreshChanged = false;
+			return;
+		}
 		const teamDir = getTeamDir(currentTeamId);
 		const effectiveTaskListId = taskListId ?? currentTeamId;
 
 		const [nextTasks, cfg] = await Promise.all([listTasks(teamDir, effectiveTaskListId), loadTeamConfig(teamDir)]);
-		tasks = nextTasks;
-		teamConfig =
+		const nextConfig =
 			cfg ??
 			(await ensureTeamConfig(teamDir, {
 				teamId: currentTeamId,
@@ -428,15 +453,41 @@ export function runLeader(pi: ExtensionAPI): void {
 				leadName: "team-lead",
 				style,
 			}));
-		style = teamConfig.style ?? style;
+		const nextStyle = nextConfig.style ?? style;
+		const nextStateKey = JSON.stringify({
+			tasks: nextTasks.map((task) => ({
+				id: task.id,
+				owner: task.owner ?? null,
+				status: task.status,
+				updatedAt: task.updatedAt,
+				blockedBy: task.blockedBy,
+				blocks: task.blocks,
+			})),
+			members: nextConfig.members.map((member) => ({
+				name: member.name,
+				status: member.status,
+				lastSeenAt: member.lastSeenAt ?? null,
+			})),
+			style: nextStyle,
+			taskListId: effectiveTaskListId,
+		});
+		lastRefreshChanged = nextStateKey !== lastRefreshStateKey;
+		lastRefreshStateKey = nextStateKey;
+
+		tasks = nextTasks;
+		teamConfig = nextConfig;
+		style = nextStyle;
 	};
 
 	let widgetSuppressed = false;
 
 	const renderWidget = () => {
 		if (!currentCtx || widgetSuppressed) return;
-		// Component widget (more informative + styled). Re-setting it is also our "refresh" trigger.
-		currentCtx.ui.setWidget("pi-teams", widgetFactory);
+		if (debouncedWidgetEnabled) {
+			debouncedRenderWidget();
+			return;
+		}
+		renderWidgetNow();
 	};
 
 	const spawnTeammate: SpawnTeammateFn = async (ctx, opts): Promise<SpawnTeammateResult> => {
@@ -451,6 +502,18 @@ export function runLeader(pi: ExtensionAPI): void {
 			return { ok: false, error: `${formatMemberDisplayName(style, name)} already exists (${strings.teamNoun})` };
 		}
 
+		const teamId = currentTeamId ?? ctx.sessionManager.getSessionId();
+		const teamDir = getTeamDir(teamId);
+		const cfgForPolicy = teamConfig ?? (await loadTeamConfig(teamDir));
+		const maxWorkersPolicy = evaluateMaxWorkersPolicy({
+			name,
+			teammates,
+			teamConfig: cfgForPolicy,
+		});
+		if (!maxWorkersPolicy.ok) {
+			return { ok: false, error: maxWorkersPolicy.error ?? "Max workers limit reached" };
+		}
+
 		// Spawn-time model / thinking overrides (optional).
 		const thinkingLevel = opts.thinking ?? pi.getThinkingLevel();
 
@@ -463,8 +526,6 @@ export function runLeader(pi: ExtensionAPI): void {
 		const { provider: childProvider, modelId: childModelId, warnings: modelWarnings } = modelResolution.value;
 		warnings.push(...modelWarnings);
 
-		const teamId = currentTeamId ?? ctx.sessionManager.getSessionId();
-		const teamDir = getTeamDir(teamId);
 		const teamSessionsDir = getTeamSessionsDir(teamDir);
 		const session = await createSessionForTeammate(ctx, mode, teamSessionsDir);
 		const { sessionFile, note } = session;
@@ -601,11 +662,11 @@ export function runLeader(pi: ExtensionAPI): void {
 		return { ok: true, name, mode, workspaceMode, childCwd, note, warnings };
 	};
 
-	const pollLeaderInbox = async () => {
-		if (!currentCtx || !currentTeamId) return;
+	const pollLeaderInbox = async (): Promise<number> => {
+		if (!currentCtx || !currentTeamId) return 0;
 		const teamDir = getTeamDir(currentTeamId);
 		const effectiveTaskListId = taskListId ?? currentTeamId;
-		await pollLeaderInboxImpl({
+		return await pollLeaderInboxImpl({
 			ctx: currentCtx,
 			teamId: currentTeamId,
 			teamDir,
@@ -615,6 +676,124 @@ export function runLeader(pi: ExtensionAPI): void {
 			pendingPlanApprovals,
 			enqueueHook,
 		});
+	};
+
+	const reconcileStaleWorkersAndLeases = async (): Promise<boolean> => {
+		if (!currentTeamId || !teamConfig) return false;
+		if (!heartbeatsEnabled && !taskLeaseRecoveryEnabled) return false;
+		const nowMs = Date.now();
+		const heartbeatConfig = getWorkerHeartbeatConfig(process.env);
+		const teamDir = getTeamDir(currentTeamId);
+		const effectiveTaskListId = taskListId ?? currentTeamId;
+		let changed = false;
+
+		if (heartbeatsEnabled) {
+			const staleWorkers = listStaleWorkerNames(teamConfig.members, {
+				nowMs,
+				staleMs: heartbeatConfig.staleMs,
+			});
+			for (const name of staleWorkers) {
+				const member = teamConfig.members.find((candidate) => candidate.name === name);
+				if (!member || member.status !== "online") continue;
+				await setMemberStatus(teamDir, name, "offline", {
+					lastSeenAt: member.lastSeenAt,
+					meta: {
+						staleDetectedAt: new Date(nowMs).toISOString(),
+						staleReason: "heartbeat_stale",
+					},
+				});
+				changed = true;
+			}
+		}
+
+		if (taskLeaseRecoveryEnabled) {
+			for (const task of tasks) {
+				if (task.status !== "in_progress" || !task.owner) continue;
+				const owner = teamConfig.members.find((member) => member.name === task.owner);
+				const recovered = await recoverLeasedTaskIfStale(teamDir, effectiveTaskListId, task.id, {
+					ownerLastSeenAt: owner?.lastSeenAt,
+					nowMs,
+					heartbeatStaleMs: heartbeatConfig.staleMs,
+				});
+				if (!recovered) continue;
+				if (recovered.status === "pending" && recovered.owner === undefined && recovered.metadata?.leaseRecoveryAt) {
+					changed = true;
+					currentCtx?.ui.notify(`Recovered stale task #${recovered.id} from ${task.owner}`, "warning");
+				}
+			}
+		}
+
+		return changed;
+	};
+
+	let refreshIdleStreak = 0;
+	let inboxIdleStreak = 0;
+	const hasActiveTeamWork = (): boolean => teammates.size > 0 || tasks.some((task) => task.status === "in_progress");
+
+	const startRefreshLoop = (ctx: ExtensionContext) => {
+		refreshIdleStreak = 0;
+		const run = async () => {
+			if (isStopping) {
+				refreshTimer = null;
+				return;
+			}
+
+			let changed = false;
+			if (!refreshInFlight) {
+				refreshInFlight = true;
+				try {
+					await heartbeatActiveAttachClaim(ctx);
+					await refreshTasks();
+					changed = lastRefreshChanged;
+					const reconciled = await reconcileStaleWorkersAndLeases();
+					if (reconciled) {
+						await refreshTasks();
+						changed = true;
+					}
+					if (changed) renderWidget();
+				} finally {
+					refreshInFlight = false;
+				}
+			}
+
+			const hasActivity = changed || hasActiveTeamWork();
+			refreshIdleStreak = hasActivity ? 0 : refreshIdleStreak + 1;
+			refreshTimer = setTimeout(
+				run,
+				getLeaderRefreshPollDelayMs({ env: process.env, idleStreak: refreshIdleStreak, hasActiveTeamWork: hasActivity }),
+			);
+		};
+
+		refreshTimer = setTimeout(run, getLeaderRefreshPollDelayMs({ env: process.env, idleStreak: 0, hasActiveTeamWork: true }));
+	};
+
+	const startInboxLoop = () => {
+		inboxIdleStreak = 0;
+		const run = async () => {
+			if (isStopping) {
+				inboxTimer = null;
+				return;
+			}
+
+			let processed = 0;
+			if (!inboxInFlight) {
+				inboxInFlight = true;
+				try {
+					processed = await pollLeaderInbox();
+				} finally {
+					inboxInFlight = false;
+				}
+			}
+
+			const hasActivity = processed > 0 || hasActiveTeamWork();
+			inboxIdleStreak = hasActivity ? 0 : inboxIdleStreak + 1;
+			inboxTimer = setTimeout(
+				run,
+				getLeaderInboxPollDelayMs({ env: process.env, idleStreak: inboxIdleStreak, hasActiveTeamWork: hasActivity }),
+			);
+		};
+
+		inboxTimer = setTimeout(run, getLeaderInboxPollDelayMs({ env: process.env, idleStreak: 0, hasActiveTeamWork: true }));
 	};
 
 	pi.on("tool_call", (event, _ctx) => {
@@ -641,33 +820,13 @@ export function runLeader(pi: ExtensionAPI): void {
 			style,
 		});
 
+		lastRefreshStateKey = "";
 		await refreshTasks();
 		renderWidget();
 
 		stopLoops();
-		refreshTimer = setInterval(async () => {
-			if (isStopping) return;
-			if (refreshInFlight) return;
-			refreshInFlight = true;
-			try {
-				await heartbeatActiveAttachClaim(ctx);
-				await refreshTasks();
-				renderWidget();
-			} finally {
-				refreshInFlight = false;
-			}
-		}, 1000);
-
-		inboxTimer = setInterval(async () => {
-			if (isStopping) return;
-			if (inboxInFlight) return;
-			inboxInFlight = true;
-			try {
-				await pollLeaderInbox();
-			} finally {
-				inboxInFlight = false;
-			}
-		}, 700);
+		startRefreshLoop(ctx);
+		startInboxLoop();
 	});
 
 	pi.on("session_switch", async (_event, ctx) => {
@@ -692,33 +851,13 @@ export function runLeader(pi: ExtensionAPI): void {
 			style,
 		});
 
+		lastRefreshStateKey = "";
 		await refreshTasks();
 		renderWidget();
 
 		// Restart background refresh/poll loops for the new session.
-		refreshTimer = setInterval(async () => {
-			if (isStopping) return;
-			if (refreshInFlight) return;
-			refreshInFlight = true;
-			try {
-				await heartbeatActiveAttachClaim(ctx);
-				await refreshTasks();
-				renderWidget();
-			} finally {
-				refreshInFlight = false;
-			}
-		}, 1000);
-
-		inboxTimer = setInterval(async () => {
-			if (isStopping) return;
-			if (inboxInFlight) return;
-			inboxInFlight = true;
-			try {
-				await pollLeaderInbox();
-			} finally {
-				inboxInFlight = false;
-			}
-		}, 700);
+		startRefreshLoop(ctx);
+		startInboxLoop();
 	});
 
 	pi.on("session_shutdown", async () => {

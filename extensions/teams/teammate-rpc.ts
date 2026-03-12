@@ -1,6 +1,12 @@
 import { spawn } from "node:child_process";
 import type { AgentEvent } from "@mariozechner/pi-agent-core";
 
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+	if (!value) return fallback;
+	const parsed = Number.parseInt(value, 10);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 export type TeammateStatus = "starting" | "idle" | "streaming" | "stopped" | "error";
 
 type RpcCommand =
@@ -121,6 +127,7 @@ export class TeammateRpc {
 
 	async start(opts: { cwd: string; env: Record<string, string>; args: string[] }): Promise<void> {
 		if (this.proc) throw new Error("Teammate already started");
+		const startupTimeoutMs = parsePositiveInt(opts.env.PI_TEAMS_RPC_START_TIMEOUT_MS, 10_000);
 
 		this.proc = spawn("pi", ["--mode", "rpc", ...opts.args], {
 			cwd: opts.cwd,
@@ -161,9 +168,14 @@ export class TeammateRpc {
 			for (const l of this.closeListeners) l(code);
 		});
 
-		// Give the child a moment to boot.
-		await new Promise((r) => setTimeout(r, 120));
-		this.status = "idle";
+		try {
+			await this.send({ type: "get_state" }, startupTimeoutMs);
+			this.status = "idle";
+		} catch (err) {
+			this.status = "error";
+			this.lastError = err instanceof Error ? err.message : String(err);
+			throw new Error(`Teammate RPC ready handshake failed for ${this.name}: ${this.lastError}`);
+		}
 	}
 
 	async stop(): Promise<void> {
@@ -241,7 +253,7 @@ export class TeammateRpc {
 		for (const l of this.eventListeners) l(ev);
 	}
 
-	private async send(cmd: RpcCommandWithoutId): Promise<RpcResponse> {
+	private async send(cmd: RpcCommandWithoutId, timeoutMs = 60_000): Promise<RpcResponse> {
 		if (!this.proc || !this.proc.stdin) throw new Error("Teammate is not running");
 		const id = `req-${this.name}-${this.nextId++}`;
 		const full = { id, ...cmd } satisfies RpcCommand;
@@ -255,7 +267,7 @@ export class TeammateRpc {
 				if (!this.pending.has(id)) return;
 				this.pending.delete(id);
 				reject(new Error(`Timeout waiting for response (id=${id}, cmd=${full.type})`));
-			}, 60_000);
+			}, timeoutMs);
 		});
 	}
 }

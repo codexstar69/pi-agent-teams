@@ -6,6 +6,7 @@ import type { ActivityTracker } from "./activity-tracker.js";
 import type { TeamTask } from "./task-store.js";
 import type { TeamConfig, TeamMember } from "./team-config.js";
 import type { TeamsStyle } from "./teams-style.js";
+import { getWorkerHeartbeatConfig, listStaleWorkerNames } from "./heartbeat-lease.js";
 import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
 import {
 	STATUS_COLOR,
@@ -93,6 +94,19 @@ export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
 				if (qgFailures > 0) {
 					lines.push(
 						truncateToWidth(theme.fg("warning", ` quality gate failures: ${qgFailures} · /team task list`), width),
+					);
+				}
+
+				const heartbeatCfg = getWorkerHeartbeatConfig(process.env);
+				const staleWorkers = listStaleWorkerNames(teamConfig?.members ?? [], {
+					staleMs: heartbeatCfg.staleMs,
+				});
+				if (staleWorkers.length > 0) {
+					lines.push(
+						truncateToWidth(
+							theme.fg("warning", ` stale worker heartbeats: ${staleWorkers.length} · ${staleWorkers.join(", ")}`),
+							width,
+						),
 					);
 				}
 

@@ -9,6 +9,7 @@ import { handleTeamAttachCommand, handleTeamDetachCommand } from "./leader-attac
 import {
 	handleTeamCleanupCommand,
 	handleTeamDelegateCommand,
+	handleTeamDoctorCommand,
 	handleTeamKillCommand,
 	handleTeamPruneCommand,
 	handleTeamShutdownCommand,
@@ -55,6 +56,7 @@ const TEAM_HELP_TEXT = [
 	"  /team plan approve <name>",
 	"  /team plan reject <name> [feedback...]",
 	"  /team cleanup [--force]",
+	"  /team doctor",
 	"  /team prune [--all]  # hide stale manual teammates (mark offline)",
 	"  /team task add <text...>",
 	"  /team task assign <id> <agent>",
@@ -207,6 +209,14 @@ export async function handleTeamCommand(opts: {
 				getTasks,
 				renderWidget,
 				style,
+			});
+		},
+
+		doctor: async () => {
+			await handleTeamDoctorCommand({
+				ctx,
+				teamId: activeTeamId,
+				getTeamConfig,
 			});
 		},
 

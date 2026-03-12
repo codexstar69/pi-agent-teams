@@ -13,7 +13,13 @@ import * as os from "node:os";
 
 // We import from .ts source (tsx handles it)
 import { withLock } from "../extensions/teams/fs-lock.js";
-import { writeToMailbox, popUnreadMessages, getInboxPath } from "../extensions/teams/mailbox.js";
+import {
+	writeToMailbox,
+	popUnreadMessages,
+	getInboxPath,
+	compactMailboxMessages,
+	getMailboxPruningConfig,
+} from "../extensions/teams/mailbox.js";
 import {
 	createTask,
 	listTasks,
@@ -22,16 +28,36 @@ import {
 	completeTask,
 	clearTasks,
 	startAssignedTask,
+	claimTask,
 	claimNextAvailableTask,
 	unassignTasksForAgent,
 	formatTaskLine,
 	addTaskDependency,
 	removeTaskDependency,
 	isTaskBlocked,
+	markTaskRetryableFailure,
+	isTaskCoolingDown,
+	refreshTaskLeaseHeartbeat,
+	recoverLeasedTaskIfStale,
+	clearTaskStoreCache,
+	getTaskPriority,
+	getTaskPriorityRank,
+	getTaskStoreCacheStats,
+	getTaskListDir,
 } from "../extensions/teams/task-store.js";
 import { ensureTeamConfig, loadTeamConfig, upsertMember, setMemberStatus, updateTeamHooksPolicy } from "../extensions/teams/team-config.js";
 import { sanitizeName } from "../extensions/teams/names.js";
+import { appendTeamEvent, getTeamEventsLogPath, readRecentTeamEvents } from "../extensions/teams/event-log.js";
 import { formatProviderModel, isDeprecatedTeammateModelId, resolveTeammateModelSelection } from "../extensions/teams/model-policy.js";
+import { evaluateMaxWorkersPolicy, getMaxWorkersLimit, getOnlineWorkerNames } from "../extensions/teams/max-workers-policy.js";
+import {
+	areAdaptivePollingEnabled,
+	getLeaderInboxPollDelayMs,
+	getLeaderRefreshPollDelayMs,
+	getWorkerPollDelayMs,
+} from "../extensions/teams/adaptive-polling.js";
+import { createDebouncedTrigger } from "../extensions/teams/debounce.js";
+import { readTaskLeaseMetadata } from "../extensions/teams/heartbeat-lease.js";
 import { getTeamsNamingRules, getTeamsStrings } from "../extensions/teams/teams-style.js";
 import {
 	getTeamsHookFailureAction,
@@ -50,6 +76,7 @@ import {
 	releaseTeamAttachClaim,
 } from "../extensions/teams/team-attach-claim.js";
 import { getTeamHelpText } from "../extensions/teams/leader-team-command.js";
+import { buildTaskShowLines } from "../extensions/teams/leader-task-commands.js";
 import {
 	TEAM_MAILBOX_NS,
 	isIdleNotification,
@@ -160,6 +187,157 @@ if (modelResolvedDeprecatedLeader.ok) {
 	assertEq(formatProviderModel(modelResolvedDeprecatedLeader.value.provider, modelResolvedDeprecatedLeader.value.modelId), null, "deprecated leader fallback has no explicit model");
 }
 
+console.log("\n1c. max-workers-policy");
+assertEq(getMaxWorkersLimit({}), null, "unset worker limit is disabled");
+assertEq(getMaxWorkersLimit({ PI_TEAMS_MAX_WORKERS: "0" }), null, "zero worker limit disables policy");
+assertEq(getMaxWorkersLimit({ PI_TEAMS_MAX_WORKERS: "-1" }), null, "negative worker limit disables policy");
+assertEq(getMaxWorkersLimit({ PI_TEAMS_MAX_WORKERS: "2" }), 2, "positive worker limit parsed");
+
+const workerNames = getOnlineWorkerNames({
+	teammates: new Map([
+		["alice", {}],
+		["bob", {}],
+	]),
+	teamConfig: {
+		version: 1,
+		teamId: "team",
+		taskListId: "task-list",
+		leadName: "team-lead",
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		members: [
+			{ name: "team-lead", role: "lead", status: "online", addedAt: new Date().toISOString() },
+			{ name: "alice", role: "worker", status: "online", addedAt: new Date().toISOString() },
+			{ name: "carol", role: "worker", status: "online", addedAt: new Date().toISOString() },
+			{ name: "dave", role: "worker", status: "offline", addedAt: new Date().toISOString() },
+		],
+	},
+});
+assertEq(workerNames.join(","), "alice,bob,carol", "online worker names union rpc and config workers");
+
+const blockedSpawn = evaluateMaxWorkersPolicy({
+	name: "zoe",
+	teammates: new Map([
+		["alice", {}],
+		["bob", {}],
+	]),
+	teamConfig: null,
+	env: { PI_TEAMS_MAX_WORKERS: "2" },
+});
+assertEq(blockedSpawn.limit, 2, "policy exposes configured limit");
+assertEq(blockedSpawn.activeWorkers.length, 2, "policy reports active worker count");
+assert(!blockedSpawn.ok, "policy blocks spawn once limit is reached");
+if (!blockedSpawn.ok) {
+	assert((blockedSpawn.error ?? "").includes("2/2"), "blocked policy error includes utilization");
+	assert((blockedSpawn.error ?? "").includes("PI_TEAMS_MAX_WORKERS"), "blocked policy error explains override");
+}
+
+const allowedSpawn = evaluateMaxWorkersPolicy({
+	name: "zoe",
+	teammates: new Map([["alice", {}]]),
+	teamConfig: null,
+	env: { PI_TEAMS_MAX_WORKERS: "2" },
+});
+assert(allowedSpawn.ok, "policy allows spawn when below limit");
+
+console.log("\n1d. adaptive-polling");
+assert(!areAdaptivePollingEnabled({}), "adaptive polling disabled by default");
+assert(areAdaptivePollingEnabled({ PI_TEAMS_ADAPTIVE_POLLING: "1" }), "adaptive polling opt-in env enables feature");
+assertEq(
+	getWorkerPollDelayMs({ env: {}, idleStreak: 9, hasInboxActivity: false, hasPendingWork: false, hasRunningWork: false }),
+	450,
+	"worker poll delay stays at legacy fast cadence when feature disabled",
+);
+assertEq(
+	getWorkerPollDelayMs({ env: { PI_TEAMS_ADAPTIVE_POLLING: "1" }, idleStreak: 0, hasInboxActivity: true, hasPendingWork: false, hasRunningWork: false }),
+	450,
+	"worker poll delay stays fast after inbox activity",
+);
+assertEq(
+	getWorkerPollDelayMs({ env: { PI_TEAMS_ADAPTIVE_POLLING: "1" }, idleStreak: 4, hasInboxActivity: false, hasPendingWork: false, hasRunningWork: false }),
+	1800,
+	"worker poll delay backs off after sustained idle",
+);
+assertEq(
+	getWorkerPollDelayMs({ env: { PI_TEAMS_ADAPTIVE_POLLING: "1" }, idleStreak: 12, hasInboxActivity: false, hasPendingWork: false, hasRunningWork: false }),
+	4000,
+	"worker poll delay caps at configured idle ceiling",
+);
+assertEq(
+	getLeaderRefreshPollDelayMs({ env: {}, idleStreak: 10, hasActiveTeamWork: false }),
+	1000,
+	"leader refresh delay stays legacy when feature disabled",
+);
+assertEq(
+	getLeaderRefreshPollDelayMs({ env: { PI_TEAMS_ADAPTIVE_POLLING: "1" }, idleStreak: 0, hasActiveTeamWork: true }),
+	1000,
+	"leader refresh delay stays fast while team is active",
+);
+assertEq(
+	getLeaderRefreshPollDelayMs({ env: { PI_TEAMS_ADAPTIVE_POLLING: "1" }, idleStreak: 5, hasActiveTeamWork: false }),
+	2500,
+	"leader refresh delay backs off while idle",
+);
+assertEq(
+	getLeaderInboxPollDelayMs({ env: { PI_TEAMS_ADAPTIVE_POLLING: "1" }, idleStreak: 6, hasActiveTeamWork: false }),
+	1600,
+	"leader inbox delay backs off while idle",
+);
+
+console.log("\n1e. debounce");
+{
+	let fireCount = 0;
+	const trigger = createDebouncedTrigger(() => {
+		fireCount += 1;
+	}, 15);
+	trigger();
+	trigger();
+	trigger();
+	await new Promise((resolve) => setTimeout(resolve, 40));
+	assertEq(fireCount, 1, "debounced trigger coalesces multiple calls into one callback");
+
+	trigger();
+	trigger.cancel();
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	assertEq(fireCount, 1, "debounced trigger cancel prevents pending callback");
+}
+
+console.log("\n1f. event-log");
+{
+	const eventsLogPath = getTeamEventsLogPath(teamDir);
+	assertEq(path.basename(eventsLogPath), "events.jsonl", "event log path uses events.jsonl filename");
+	assert(eventsLogPath.includes(`${path.sep}logs${path.sep}`), "event log path is nested under team logs directory");
+
+	await appendTeamEvent(teamDir, {
+		ts: "2026-03-12T00:00:00.000Z",
+		kind: "task_created",
+		teamId: "team-a",
+		taskId: "1",
+		data: { subject: "first" },
+	});
+	await appendTeamEvent(teamDir, {
+		ts: "2026-03-12T00:00:01.000Z",
+		kind: "task_claimed",
+		teamId: "team-a",
+		member: "agent1",
+		taskId: "1",
+		data: { owner: "agent1" },
+	});
+	const allEvents = await readRecentTeamEvents(teamDir);
+	assertEq(allEvents.length, 2, "event log reads appended events");
+	assertEq(allEvents[0]?.kind, "task_created", "event log preserves append order");
+	assertEq(allEvents[1]?.member, "agent1", "event log preserves event payload fields");
+
+	const limitedEvents = await readRecentTeamEvents(teamDir, { limit: 1 });
+	assertEq(limitedEvents.length, 1, "event log limit returns last N events");
+	assertEq(limitedEvents[0]?.kind, "task_claimed", "event log limit keeps newest event");
+
+	fs.appendFileSync(eventsLogPath, '{"ts":"2026-03-12T00:00:02.000Z","kind":"bad"}\nnot-json\n');
+	const eventsAfterMalformed = await readRecentTeamEvents(teamDir);
+	assertEq(eventsAfterMalformed.length, 3, "event log ignores malformed jsonl lines");
+	assertEq(eventsAfterMalformed.at(-1)?.kind, "bad", "event log still reads valid lines after malformed data");
+}
+
 // ── 2. fs-lock ───────────────────────────────────────────────────────
 console.log("\n2. fs-lock.withLock");
 {
@@ -179,6 +357,52 @@ console.log("\n2. fs-lock.withLock");
 	const result = await withLock(lockFile, async () => "ok", { staleMs: 1, timeoutMs: 500 });
 	assertEq(result, "ok", "withLock removes stale lock file");
 	assert(!fs.existsSync(lockFile), "stale lock cleaned up after");
+}
+
+{
+	// Dead-owner lock is reclaimed even before stale timeout elapses.
+	const lockFile = path.join(tmpRoot, "dead-owner.lock");
+	fs.writeFileSync(
+		lockFile,
+		JSON.stringify({
+			pid: 2147483647,
+			hostname: os.hostname(),
+			createdAt: new Date().toISOString(),
+			label: "dead-owner",
+		}),
+	);
+
+	const result = await withLock(lockFile, async () => "reclaimed", { staleMs: 60_000, timeoutMs: 500 });
+	assertEq(result, "reclaimed", "withLock reclaims dead-owner lock before stale timeout");
+	assert(!fs.existsSync(lockFile), "dead-owner lock cleaned up after reclaim");
+}
+
+{
+	// Live-owner lock is not reclaimed just because it looks stale.
+	const lockFile = path.join(tmpRoot, "live-owner.lock");
+	fs.writeFileSync(
+		lockFile,
+		JSON.stringify({
+			pid: process.pid,
+			hostname: os.hostname(),
+			createdAt: new Date().toISOString(),
+			label: "live-owner",
+		}),
+	);
+	const old = new Date(Date.now() - 120_000);
+	fs.utimesSync(lockFile, old, old);
+
+	let message = "";
+	try {
+		await withLock(lockFile, async () => "unexpected", { staleMs: 1, timeoutMs: 120, pollMs: 10 });
+	} catch (err) {
+		message = err instanceof Error ? err.message : String(err);
+	}
+
+	assert(message.includes("Timeout acquiring lock:"), "withLock times out when live owner still holds lock file");
+	assert(message.includes("live-owner"), "withLock timeout includes lock label diagnostics");
+	assert(message.includes(String(process.pid)), "withLock timeout includes owner pid diagnostics");
+	fs.unlinkSync(lockFile);
 }
 
 {
@@ -248,6 +472,42 @@ console.log("\n3. mailbox");
 	});
 	const msgs3 = await popUnreadMessages(teamDir, TEAM_MAILBOX_NS, "agent1");
 	assertEq(msgs3.length, 2, "pop returns 2 new unread messages");
+
+	const pruneCfg = getMailboxPruningConfig({
+		PI_TEAMS_MAILBOX_PRUNING: "1",
+		PI_TEAMS_MAILBOX_MAX_READ_MESSAGES: "2",
+		PI_TEAMS_MAILBOX_MAX_TOTAL_MESSAGES: "3",
+	});
+	assert(pruneCfg.enabled, "mailbox pruning config enabled by env flag");
+	assertEq(pruneCfg.maxReadMessages, 2, "mailbox pruning config parses read retention override");
+	assertEq(pruneCfg.maxTotalMessages, 3, "mailbox pruning config parses total retention override");
+	const compactedHelper = compactMailboxMessages(
+		[
+			{ from: "lead", text: "r1", timestamp: "2026-01-01T00:00:00Z", read: true },
+			{ from: "lead", text: "r2", timestamp: "2026-01-01T00:00:01Z", read: true },
+			{ from: "lead", text: "r3", timestamp: "2026-01-01T00:00:02Z", read: true },
+			{ from: "lead", text: "u1", timestamp: "2026-01-01T00:00:03Z", read: false },
+		],
+		pruneCfg,
+	);
+	assertEq(compactedHelper.map((m) => m.text).join(","), "r2,r3,u1", "mailbox compaction keeps unread plus newest read history");
+
+	for (let i = 0; i < 80; i++) {
+		await writeToMailbox(teamDir, TEAM_MAILBOX_NS, "agent-prune", {
+			from: i % 2 === 0 ? "team-lead" : "peer",
+			text: `bulk-${i}`,
+			timestamp: `2025-01-01T00:${String(i).padStart(2, "0")}:00Z`,
+		});
+	}
+	const prunedMsgs = await popUnreadMessages(teamDir, TEAM_MAILBOX_NS, "agent-prune");
+	assertEq(prunedMsgs.length, 80, "pop returns all unread messages before compaction");
+	const prunedInboxRaw: unknown = JSON.parse(
+		fs.readFileSync(getInboxPath(teamDir, TEAM_MAILBOX_NS, "agent-prune"), "utf8"),
+	);
+	assert(Array.isArray(prunedInboxRaw), "compacted inbox remains a json array");
+	assert((Array.isArray(prunedInboxRaw) ? prunedInboxRaw.length : 0) <= 50, "mailbox compaction bounds retained messages");
+	const lastPruned = Array.isArray(prunedInboxRaw) ? prunedInboxRaw.at(-1) : undefined;
+	assert(isRecord(lastPruned) && lastPruned.text === "bulk-79", "mailbox compaction retains newest message");
 }
 
 // ── 4. task-store ────────────────────────────────────────────────────
@@ -273,12 +533,116 @@ console.log("\n4. task-store");
 	const fetched = await getTask(teamDir, taskListId, t1.id);
 	assertEq(fetched?.subject, "Write tests", "getTask returns correct task");
 
+	const cacheTaskListId = `${taskListId}-cache`;
+	const cachedA = await createTask(teamDir, cacheTaskListId, {
+		subject: "Cache A",
+		description: "Used to verify task-store memoization",
+	});
+	await createTask(teamDir, cacheTaskListId, {
+		subject: "Cache B",
+		description: "Used to verify task-store memoization",
+	});
+	const originalReadFile = fs.promises.readFile.bind(fs.promises);
+	let readFileCount = 0;
+	(fs.promises as typeof fs.promises & { readFile: typeof fs.promises.readFile }).readFile = (async (...args) => {
+		readFileCount += 1;
+		return await originalReadFile(...args);
+	}) as typeof fs.promises.readFile;
+	try {
+		const cachedTask1 = await getTask(teamDir, cacheTaskListId, cachedA.id);
+		const readsAfterFirstGet = readFileCount;
+		const cachedTask2 = await getTask(teamDir, cacheTaskListId, cachedA.id);
+		assertEq(cachedTask1?.subject, "Cache A", "cached getTask first read returns task");
+		assertEq(cachedTask2?.subject, "Cache A", "cached getTask second read returns task");
+		assertEq(readFileCount, readsAfterFirstGet, "getTask reuses cached task file reads when unchanged");
+		assertEq(getTaskPriority(cachedTask1 ?? cachedA), "normal", "task priority defaults to normal when metadata missing");
+		assertEq(getTaskPriorityRank("urgent"), 3, "urgent task priority rank is highest");
+		assertEq(getTaskPriorityRank("low"), 0, "low task priority rank is lowest");
+
+		const cachedList1 = await listTasks(teamDir, cacheTaskListId);
+		const readsAfterFirstList = readFileCount;
+		const cachedList2 = await listTasks(teamDir, cacheTaskListId);
+		assertEq(cachedList1.length, 2, "cached listTasks first read returns both tasks");
+		assertEq(cachedList2.length, 2, "cached listTasks second read returns both tasks");
+		assertEq(readFileCount, readsAfterFirstList, "listTasks reuses cached task reads when unchanged");
+
+		await updateTask(teamDir, cacheTaskListId, cachedA.id, (cur) => ({ ...cur, subject: "Cache A updated" }));
+		const refreshed1 = await getTask(teamDir, cacheTaskListId, cachedA.id);
+		const readsAfterRefresh = readFileCount;
+		const refreshed2 = await getTask(teamDir, cacheTaskListId, cachedA.id);
+		assertEq(refreshed1?.subject, "Cache A updated", "cache invalidation surfaces updated task data");
+		assertEq(readFileCount, readsAfterRefresh, "task cache is repopulated after invalidation");
+		assertEq(refreshed2?.subject, "Cache A updated", "repopulated cache returns updated task data");
+	} finally {
+		(fs.promises as typeof fs.promises & { readFile: typeof fs.promises.readFile }).readFile = originalReadFile;
+	}
+
 	// update
 	const updated = await updateTask(teamDir, taskListId, t1.id, (cur) => ({
 		...cur,
 		status: "in_progress",
 	}));
 	assertEq(updated?.status, "in_progress", "updateTask changes status");
+
+	const taskEventTeamDir = path.join(tmpRoot, "task-event-team");
+	const taskEventListId = "task-events";
+	const loggedTask = await createTask(taskEventTeamDir, taskEventListId, {
+		subject: "Logged task",
+		description: "used to verify task-store event logging",
+	});
+	const claimedLoggedTask = await claimTask(taskEventTeamDir, taskEventListId, loggedTask.id, "logger", {
+		leaseDurationMs: 10_000,
+		nowMs: Date.UTC(2026, 2, 12, 12, 0, 0),
+	});
+	await completeTask(taskEventTeamDir, taskEventListId, loggedTask.id, "logger", "logged result");
+	const taskEvents = await readRecentTeamEvents(taskEventTeamDir);
+	assert(taskEvents.some((event) => event.kind === "task_created" && event.taskId === loggedTask.id), "createTask appends task_created event");
+	assert(taskEvents.some((event) => event.kind === "task_claimed" && event.taskId === loggedTask.id), "claimTask appends task_claimed event");
+	assert(taskEvents.some((event) => event.kind === "task_completed" && event.taskId === loggedTask.id), "completeTask appends task_completed event");
+	assertEq(claimedLoggedTask?.owner, "logger", "logged task claim still succeeds while event logging is enabled");
+	const taskShowLines = buildTaskShowLines(
+		{
+			id: "show-1",
+			subject: "Visible task",
+			description: "Inspect visibility",
+			owner: "agent-show",
+			status: "in_progress",
+			blocks: [],
+			blockedBy: ["dep-1"],
+			createdAt: "2026-03-12T12:00:00.000Z",
+			updatedAt: "2026-03-12T12:05:00.000Z",
+			metadata: {
+				priority: "urgent",
+				retryCount: 2,
+				retryLimit: 3,
+				cooldownUntil: "2026-03-12T12:10:00.000Z",
+				leaseRecoveryReason: "lease_expired_and_owner_stale",
+				taskLease: {
+					owner: "agent-show",
+					token: "abcdef1234567890",
+					acquiredAt: "2026-03-12T12:00:00.000Z",
+					heartbeatAt: "2026-03-12T12:05:00.000Z",
+					expiresAt: "2026-03-12T12:15:00.000Z",
+				},
+				qualityGateStatus: "failed",
+				qualityGateSummary: "tests failed",
+			},
+		},
+		{
+			blocked: true,
+			recentEvents: [
+				{ ts: "2026-03-12T12:01:00.000Z", kind: "task_claimed", taskId: "show-1", member: "agent-show" },
+				{ ts: "2026-03-12T12:06:00.000Z", kind: "task_recovered", taskId: "show-1", data: { reason: "lease_expired_and_owner_stale" } },
+			],
+		},
+	);
+	assert(taskShowLines.some((line) => line.includes("priority: urgent")), "task show lines include priority");
+	assert(taskShowLines.some((line) => line.includes("retry: 2/3")), "task show lines include retry summary");
+	assert(taskShowLines.some((line) => line.includes("cooldownUntil: 2026-03-12T12:10:00.000Z")), "task show lines include cooldown metadata");
+	assert(taskShowLines.some((line) => line.includes("lease: owner=agent-show expiresAt=2026-03-12T12:15:00.000Z token=abcdef12")), "task show lines include lease summary");
+	assert(taskShowLines.some((line) => line.includes("leaseRecoveryReason: lease_expired_and_owner_stale")), "task show lines include lease recovery reason");
+	assert(taskShowLines.some((line) => line.includes("quality gate: failed • tests failed")), "task show lines include quality gate summary");
+	assert(taskShowLines.some((line) => line.includes("task_recovered • lease_expired_and_owner_stale")), "task show lines include recent task events");
 
 	// startAssignedTask — requires task.owner === agentName && status === pending
 	// First assign t2 to agent2, then start it
@@ -287,11 +651,33 @@ console.log("\n4. task-store");
 	const t2after = await getTask(teamDir, taskListId, t2.id);
 	assertEq(t2after?.status, "in_progress", "startAssignedTask sets in_progress");
 	assertEq(t2after?.owner, "agent2", "startAssignedTask preserves owner");
+	const t2lease = readTaskLeaseMetadata(t2after?.metadata);
+	assertEq(t2lease?.owner, "agent2", "startAssignedTask attaches lease owner metadata");
+	assert(typeof t2lease?.token === "string" && t2lease.token.length > 0, "startAssignedTask attaches lease token metadata");
+	const refreshedLeaseTask = await refreshTaskLeaseHeartbeat(teamDir, taskListId, t2.id, "agent2", {
+		nowMs: Date.UTC(2026, 2, 12, 10, 0, 0),
+		leaseDurationMs: 15_000,
+	});
+	const refreshedLease = readTaskLeaseMetadata(refreshedLeaseTask?.metadata);
+	assertEq(refreshedLease?.owner, "agent2", "refreshTaskLeaseHeartbeat preserves lease owner");
+	assertEq(refreshedLease?.token, t2lease?.token, "refreshTaskLeaseHeartbeat preserves lease token");
+	assertEq(refreshedLease?.heartbeatAt, new Date(Date.UTC(2026, 2, 12, 10, 0, 0)).toISOString(), "refreshTaskLeaseHeartbeat updates heartbeat time");
+	assertEq(refreshedLease?.expiresAt, new Date(Date.UTC(2026, 2, 12, 10, 0, 15)).toISOString(), "refreshTaskLeaseHeartbeat extends lease expiration");
 
 	// completeTask
 	await completeTask(teamDir, taskListId, t1.id, "agent1", "All tests passing");
 	const t1done = await getTask(teamDir, taskListId, t1.id);
 	assertEq(t1done?.status, "completed", "completeTask sets completed");
+
+	const leaseCompleteTask = await createTask(teamDir, taskListId, {
+		subject: "Lease complete",
+		description: "used to verify lease cleanup on completion",
+		owner: "agent-complete",
+	});
+	await startAssignedTask(teamDir, taskListId, leaseCompleteTask.id, "agent-complete");
+	await completeTask(teamDir, taskListId, leaseCompleteTask.id, "agent-complete", "done");
+	const leaseCompleteDone = await getTask(teamDir, taskListId, leaseCompleteTask.id);
+	assertEq(readTaskLeaseMetadata(leaseCompleteDone?.metadata), null, "completeTask clears lease metadata");
 
 	// formatTaskLine
 	assert(t1done !== null, "completed task can be re-fetched");
@@ -301,20 +687,70 @@ console.log("\n4. task-store");
 		assert(line.includes("Write tests"), "formatTaskLine includes subject");
 	}
 
+	const priorityTaskListId = `${taskListId}-priority`;
+	const lowPriorityTask = await createTask(teamDir, priorityTaskListId, {
+		subject: "Low priority",
+		description: "should not be claimed first when higher-priority claimable work exists",
+	});
+	const urgentPriorityTask = await createTask(teamDir, priorityTaskListId, {
+		subject: "Urgent priority",
+		description: "should be claimed first among claimable tasks",
+	});
+	const blockerTask = await createTask(teamDir, priorityTaskListId, {
+		subject: "Blocker",
+		description: "keeps blocked urgent task from being claimable",
+	});
+	const blockedUrgentTask = await createTask(teamDir, priorityTaskListId, {
+		subject: "Blocked urgent",
+		description: "should stay blocked despite higher priority",
+	});
+	await updateTask(teamDir, priorityTaskListId, lowPriorityTask.id, (cur) => ({
+		...cur,
+		metadata: { ...(cur.metadata ?? {}), priority: "low" },
+	}));
+	await updateTask(teamDir, priorityTaskListId, urgentPriorityTask.id, (cur) => ({
+		...cur,
+		metadata: { ...(cur.metadata ?? {}), priority: "urgent" },
+	}));
+	await updateTask(teamDir, priorityTaskListId, blockedUrgentTask.id, (cur) => ({
+		...cur,
+		metadata: { ...(cur.metadata ?? {}), priority: "urgent" },
+	}));
+	const urgentTaskFetched = await getTask(teamDir, priorityTaskListId, urgentPriorityTask.id);
+	assertEq(getTaskPriority(lowPriorityTask), "normal", "getTaskPriority defaults missing metadata to normal");
+	assertEq(getTaskPriority(urgentTaskFetched ?? urgentPriorityTask), "urgent", "getTaskPriority reads metadata priority");
+	assertEq(getTaskPriorityRank("urgent"), 3, "getTaskPriorityRank maps urgent to highest rank");
+	assertEq(getTaskPriorityRank("low"), 0, "getTaskPriorityRank maps low to lowest rank");
+	const depResPriority = await addTaskDependency(teamDir, priorityTaskListId, blockedUrgentTask.id, blockerTask.id);
+	assert(depResPriority.ok, "priority test dependency edge ok");
+
 	// claimNextAvailableTask
 	const t3 = await createTask(teamDir, taskListId, {
 		subject: "Unclaimed task",
 		description: "nobody owns this",
 	});
-	const claimed = await claimNextAvailableTask(teamDir, taskListId, "agent3");
+	const priorityClaim = await claimNextAvailableTask(teamDir, priorityTaskListId, "priority-agent", {
+		nowMs: Date.UTC(2026, 2, 12, 7, 0, 0),
+	});
+	assertEq(priorityClaim?.id, urgentPriorityTask.id, "claimNextAvailableTask prefers highest-priority claimable task");
+	const blockedUrgentAfterPriorityClaim = await getTask(teamDir, priorityTaskListId, blockedUrgentTask.id);
+	assertEq(blockedUrgentAfterPriorityClaim?.owner, undefined, "blocked urgent task remains unclaimed despite higher priority");
+
+	const claimNowMs = Date.UTC(2026, 2, 12, 8, 0, 0);
+	const claimed = await claimNextAvailableTask(teamDir, taskListId, "agent3", { nowMs: claimNowMs, leaseDurationMs: 20_000 });
 	assert(claimed !== null, "claimNextAvailableTask finds a task");
 	assertEq(claimed?.owner, "agent3", "claimed task now owned by agent3");
+	const claimedLease = readTaskLeaseMetadata(claimed?.metadata);
+	assertEq(claimedLease?.owner, "agent3", "claimNextAvailableTask attaches lease owner metadata");
+	assertEq(claimedLease?.acquiredAt, new Date(claimNowMs).toISOString(), "claimNextAvailableTask lease records acquisition time");
+	assertEq(claimedLease?.expiresAt, new Date(claimNowMs + 20_000).toISOString(), "claimNextAvailableTask lease records expiry time");
 
 	// unassignTasksForAgent — unassigns all non-completed tasks for agent
 	// agent3 claimed a task above, unassign it
 	await unassignTasksForAgent(teamDir, taskListId, "agent3", "agent3 left");
 	const t3unassigned = await getTask(teamDir, taskListId, t3.id);
 	assertEq(t3unassigned?.owner, undefined, "unassignTasksForAgent clears owner");
+	assertEq(readTaskLeaseMetadata(t3unassigned?.metadata), null, "unassignTasksForAgent clears lease metadata");
 
 	// dependencies
 	const depRes = await addTaskDependency(teamDir, taskListId, t3.id, t2.id);
@@ -324,8 +760,121 @@ console.log("\n4. task-store");
 	const blocked = t3fetched ? await isTaskBlocked(teamDir, taskListId, t3fetched) : false;
 	assert(blocked, "task is blocked by dependency");
 
+	const t4 = await createTask(teamDir, taskListId, {
+		subject: "Indirect dependency",
+		description: "used to verify cycle detection walks dependency chains",
+	});
+	const depRes2 = await addTaskDependency(teamDir, taskListId, t4.id, t3.id);
+	assert(depRes2.ok, "second dependency edge ok");
+
+	const cycleRes = await addTaskDependency(teamDir, taskListId, t2.id, t4.id);
+	assert(!cycleRes.ok, "cyclic dependencies are rejected");
+	if (!cycleRes.ok) {
+		assert(cycleRes.error.toLowerCase().includes("cycle"), "cycle rejection mentions cycle");
+		assert(cycleRes.error.includes(t2.id), "cycle rejection mentions task id");
+		assert(cycleRes.error.includes(t4.id), "cycle rejection mentions dependency id");
+		assert(cycleRes.error.includes(t3.id), "cycle rejection mentions intermediate dependency path");
+	}
+
+	const t2AfterCycle = await getTask(teamDir, taskListId, t2.id);
+	assertEq(t2AfterCycle?.blockedBy.length ?? 0, 0, "rejected cycle does not mutate task dependencies");
+
 	const rmDep = await removeTaskDependency(teamDir, taskListId, t3.id, t2.id);
 	assert(rmDep.ok, "removeTaskDependency ok");
+
+	const retryTaskListId = `${taskListId}-retry`;
+	const retryTask = await createTask(teamDir, retryTaskListId, {
+		subject: "Retry me later",
+		description: "used to verify retry metadata and cooldown gating",
+		owner: "agent4",
+	});
+	await startAssignedTask(teamDir, retryTaskListId, retryTask.id, "agent4");
+	const failureAt = Date.UTC(2026, 2, 12, 0, 0, 0);
+	const retryMarked = await markTaskRetryableFailure(teamDir, retryTaskListId, retryTask.id, "agent4", {
+		reason: "abort requested",
+		partialResult: "partial work",
+		nowMs: failureAt,
+		baseDelayMs: 1_000,
+		maxAttempts: 2,
+	});
+	assertEq(retryMarked?.status, "pending", "retryable failure resets task to pending");
+	assertEq(retryMarked?.owner, undefined, "retryable failure clears owner for later reclaim");
+	assertEq(retryMarked?.metadata?.retryCount, 1, "retryable failure increments retryCount");
+	assertEq(retryMarked?.metadata?.retryExhausted, false, "first retry is not exhausted");
+	assertEq(readTaskLeaseMetadata(retryMarked?.metadata), null, "retryable failure clears lease metadata");
+	assertEq(
+		retryMarked?.metadata?.cooldownUntil,
+		new Date(failureAt + 1_000).toISOString(),
+		"retryable failure records cooldownUntil",
+	);
+	assert(isTaskCoolingDown(retryMarked ?? retryTask, failureAt + 500), "cooldown is active before cooldownUntil");
+
+	const readyTask = await createTask(teamDir, retryTaskListId, {
+		subject: "Ready now",
+		description: "should be claimable while retry task cools down",
+	});
+	const claimedReady = await claimNextAvailableTask(teamDir, retryTaskListId, "agent5", { nowMs: failureAt + 500 });
+	assertEq(claimedReady?.id, readyTask.id, "claimNextAvailableTask skips cooled-down retry tasks");
+
+	await updateTask(teamDir, retryTaskListId, retryTask.id, (cur) => ({ ...cur, owner: "agent4", status: "in_progress" }));
+	const exhausted = await markTaskRetryableFailure(teamDir, retryTaskListId, retryTask.id, "agent4", {
+		reason: "abort requested again",
+		nowMs: failureAt + 10_000,
+		baseDelayMs: 1_000,
+		maxAttempts: 2,
+	});
+	assertEq(exhausted?.metadata?.retryCount, 2, "second retryable failure increments retryCount again");
+	assertEq(exhausted?.metadata?.retryExhausted, true, "retry policy marks task exhausted at max attempts");
+	assert(!isTaskCoolingDown(exhausted ?? retryTask, failureAt + 10_500), "exhausted task no longer depends on cooldown window");
+
+	const recoverTask = await createTask(teamDir, retryTaskListId, {
+		subject: "Recover me",
+		description: "used to verify stale lease recovery",
+		owner: "agent-stale",
+	});
+	await startAssignedTask(teamDir, retryTaskListId, recoverTask.id, "agent-stale", {
+		nowMs: Date.UTC(2026, 2, 12, 11, 0, 0),
+		leaseDurationMs: 10_000,
+	});
+	const recoveredTask = await recoverLeasedTaskIfStale(teamDir, retryTaskListId, recoverTask.id, {
+		ownerLastSeenAt: new Date(Date.UTC(2026, 2, 12, 11, 0, 0)).toISOString(),
+		nowMs: Date.UTC(2026, 2, 12, 11, 0, 20),
+		heartbeatStaleMs: 5_000,
+	});
+	assertEq(recoveredTask?.status, "pending", "stale leased task is reset to pending during recovery");
+	assertEq(recoveredTask?.owner, undefined, "stale leased task recovery clears owner");
+	assertEq(readTaskLeaseMetadata(recoveredTask?.metadata), null, "stale leased task recovery clears lease metadata");
+	assertEq(recoveredTask?.metadata?.leaseRecoveryReason, "lease_expired_and_owner_stale", "stale leased task recovery records reason metadata");
+	const recoveryEvents = await readRecentTeamEvents(teamDir, { limit: 20 });
+	assert(recoveryEvents.some((event) => event.kind === "task_recovered" && event.taskId === recoverTask.id), "recoverLeasedTaskIfStale appends task_recovered event");
+
+	clearTaskStoreCache();
+	const cacheStats0 = getTaskStoreCacheStats();
+	assertEq(cacheStats0.fileCacheHits, 0, "task cache stats start with zero file hits after reset");
+	assertEq(cacheStats0.listCacheHits, 0, "task cache stats start with zero list hits after reset");
+
+	await getTask(teamDir, taskListId, retryTask.id);
+	const cacheStatsAfterRead = getTaskStoreCacheStats();
+	assertEq(cacheStatsAfterRead.fileReads, 1, "first cached getTask records one file read");
+	await getTask(teamDir, taskListId, retryTask.id);
+	const cacheStatsAfterHit = getTaskStoreCacheStats();
+	assertEq(cacheStatsAfterHit.fileCacheHits, 1, "second cached getTask records a cache hit");
+
+	await listTasks(teamDir, taskListId);
+	const cacheStatsAfterListRead = getTaskStoreCacheStats();
+	assertEq(cacheStatsAfterListRead.listReads, 1, "first cached listTasks records one list read");
+	await listTasks(teamDir, taskListId);
+	const cacheStatsAfterListHit = getTaskStoreCacheStats();
+	assertEq(cacheStatsAfterListHit.listCacheHits, 1, "second cached listTasks records a list cache hit");
+
+	const retryTaskFile = path.join(getTaskListDir(teamDir, taskListId), `${retryTask.id}.json`);
+	const retryTaskRaw = JSON.parse(fs.readFileSync(retryTaskFile, "utf8")) as { subject: string };
+	retryTaskRaw.subject = "Retry me later (external change)";
+	fs.writeFileSync(retryTaskFile, JSON.stringify(retryTaskRaw, null, 2) + "\n", "utf8");
+	const future = new Date(Date.now() + 2_000);
+	fs.utimesSync(retryTaskFile, future, future);
+	const refreshedRetryTask = await getTask(teamDir, taskListId, retryTask.id);
+	assertEq(refreshedRetryTask?.subject, "Retry me later (external change)", "task cache invalidates after external file mutation");
 
 	// clearTasks (completed only)
 	const clearResult = await clearTasks(teamDir, taskListId, "completed");
@@ -723,6 +1272,7 @@ console.log("\n11. docs/help drift guard");
 	assert(help.includes("/team style init"), "help mentions /team style init");
 	assert(help.includes("/team attach <teamId> [--claim]"), "help mentions /team attach claim mode");
 	assert(help.includes("/team detach"), "help mentions /team detach");
+	assert(help.includes("/team doctor"), "help mentions /team doctor");
 
 	const readmePath = path.join(process.cwd(), "README.md");
 	if (!fs.existsSync(readmePath)) {
@@ -732,6 +1282,7 @@ console.log("\n11. docs/help drift guard");
 		assert(readme.includes("/team style list"), "README mentions /team style list");
 		assert(readme.includes("/team attach <teamId> [--claim]"), "README mentions /team attach claim mode");
 		assert(readme.includes("/team detach"), "README mentions /team detach");
+		assert(readme.includes("/team doctor"), "README mentions /team doctor");
 		assert(readme.includes("\"action\": \"task_assign\""), "README mentions teams tool task_assign action");
 		assert(readme.includes("\"action\": \"task_dep_add\""), "README mentions teams tool task_dep_add action");
 		assert(readme.includes("\"action\": \"message_broadcast\""), "README mentions teams tool message_broadcast action");

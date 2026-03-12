@@ -3,6 +3,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { cleanupTeamDir } from "./cleanup.js";
+import { collectTeamDoctorReport, formatTeamDoctorReport } from "./doctor.js";
+import { getWorkerHeartbeatConfig } from "./heartbeat-lease.js";
 import { writeToMailbox } from "./mailbox.js";
 import { sanitizeName } from "./names.js";
 import { getTeamDir, getTeamsRootDir, getTeamsStylesDir } from "./paths.js";
@@ -147,6 +149,22 @@ export async function handleTeamStyleCommand(opts: {
 	await refreshTasks();
 	renderWidget();
 	ctx.ui.notify(`Teams style set to ${next}`, "info");
+}
+
+export async function handleTeamDoctorCommand(opts: {
+	ctx: ExtensionCommandContext;
+	teamId: string;
+	getTeamConfig: () => TeamConfig | null;
+}): Promise<void> {
+	const { ctx, teamId, getTeamConfig } = opts;
+	const teamDir = getTeamDir(teamId);
+	const heartbeatConfig = getWorkerHeartbeatConfig(process.env);
+	const report = await collectTeamDoctorReport({
+		teamDir,
+		teamConfig: getTeamConfig(),
+		heartbeatStaleMs: heartbeatConfig.staleMs,
+	});
+	ctx.ui.notify(formatTeamDoctorReport(report), "info");
 }
 
 export async function handleTeamCleanupCommand(opts: {

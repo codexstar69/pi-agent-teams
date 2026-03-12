@@ -34,7 +34,13 @@
     "integration-claim-test": "tsx scripts/integration-claim-test.mts",
     "integration-spawn-overrides-test": "tsx scripts/integration-spawn-overrides-test.mts",
     "integration-hooks-remediation-test": "tsx scripts/integration-hooks-remediation-test.mts",
-    "integration-todo-test": "tsx scripts/integration-todo-test.mts"
+    "integration-heartbeat-lease-scaffold-test": "tsx scripts/integration-heartbeat-lease-scaffold-test.mts",
+    "integration-todo-test": "tsx scripts/integration-todo-test.mts",
+    "integration-rpc-ready-handshake-test": "tsx scripts/integration-rpc-ready-handshake-test.mts",
+    "integration-cleanup-worktree-plan-test": "tsx scripts/integration-cleanup-worktree-plan-test.mts",
+    "integration-git-worktree-cleanup-helper-test": "tsx scripts/integration-git-worktree-cleanup-helper-test.mts",
+    "integration-git-worktree-cleanup-test": "tsx scripts/integration-git-worktree-cleanup-test.mts",
+    "integration-team-doctor-test": "tsx scripts/integration-team-doctor-test.mts"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",

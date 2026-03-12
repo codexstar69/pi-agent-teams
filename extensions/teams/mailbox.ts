@@ -11,6 +11,12 @@ export interface MailboxMessage {
 	color?: string;
 }
 
+export interface MailboxPruningConfig {
+	enabled: boolean;
+	maxReadMessages: number;
+	maxTotalMessages: number;
+}
+
 function inboxDir(teamDir: string, namespace: string): string {
 	return path.join(teamDir, "mailboxes", sanitizeName(namespace), "inboxes");
 }
@@ -41,6 +47,20 @@ function coerceMailboxMessage(v: unknown): MailboxMessage | null {
 	return { from: v.from, text: v.text, timestamp: v.timestamp, read, color };
 }
 
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+	if (!value) return fallback;
+	const parsed = Number.parseInt(value, 10);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export function getMailboxPruningConfig(env: NodeJS.ProcessEnv = process.env): MailboxPruningConfig {
+	const rawEnabled = env.PI_TEAMS_MAILBOX_PRUNING?.trim();
+	const enabled = rawEnabled === undefined ? true : rawEnabled !== "0";
+	const maxReadMessages = parsePositiveInt(env.PI_TEAMS_MAILBOX_MAX_READ_MESSAGES, 50);
+	const maxTotalMessages = Math.max(maxReadMessages, parsePositiveInt(env.PI_TEAMS_MAILBOX_MAX_TOTAL_MESSAGES, 200));
+	return { enabled, maxReadMessages, maxTotalMessages };
+}
+
 async function readJsonArray(file: string): Promise<unknown[]> {
 	try {
 		const raw = await fs.promises.readFile(file, "utf8");
@@ -56,6 +76,29 @@ async function writeJsonAtomic(file: string, data: unknown): Promise<void> {
 	const tmp = `${file}.tmp.${process.pid}.${Date.now()}`;
 	await fs.promises.writeFile(tmp, JSON.stringify(data, null, 2) + "\n", "utf8");
 	await fs.promises.rename(tmp, file);
+}
+
+export function compactMailboxMessages(messages: MailboxMessage[], config: MailboxPruningConfig): MailboxMessage[] {
+	if (!config.enabled) return messages;
+	if (messages.length <= config.maxReadMessages) return messages;
+
+	const unreadCount = messages.reduce((count, message) => count + (message.read ? 0 : 1), 0);
+	const readBudget = Math.max(
+		0,
+		Math.min(config.maxReadMessages, config.maxTotalMessages > unreadCount ? config.maxTotalMessages - unreadCount : 0),
+	);
+
+	const keptReadIndexes = new Set<number>();
+	let remainingReadBudget = readBudget;
+	for (let i = messages.length - 1; i >= 0; i -= 1) {
+		const message = messages[i];
+		if (!message || !message.read) continue;
+		if (remainingReadBudget <= 0) break;
+		keptReadIndexes.add(i);
+		remainingReadBudget -= 1;
+	}
+
+	return messages.filter((message, index) => !message.read || keptReadIndexes.has(index));
 }
 
 /** Append a message to an agent's inbox. */
@@ -117,14 +160,13 @@ export async function popUnreadMessages(teamDir: string, namespace: string, agen
 					return m;
 				});
 
-				if (unread.length) await writeJsonAtomic(inboxPath, updated);
+				const compacted = compactMailboxMessages(updated, getMailboxPruningConfig());
+				if (unread.length || compacted.length !== arr.length) await writeJsonAtomic(inboxPath, compacted);
 				return unread;
 			},
 			{ label: `mailbox:pop:${namespace}:${agentName}` },
 		);
 	} catch (err: unknown) {
-		// In practice this can happen if a previous process crashed and left a non-stale
-		// lockfile behind. Treat as transient and try again on the next poll tick.
 		if (isLockTimeoutError(err)) return [];
 		throw err;
 	}

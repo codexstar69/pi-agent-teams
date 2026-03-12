@@ -207,6 +207,7 @@ All management commands live under `/team`.
 | `/team prune [--all]` | Mark stale manual teammates offline (hides them in widget) |
 | `/team kill <name>` | Force-terminate |
 | `/team cleanup [--force]` | Delete team artifacts |
+| `/team doctor` | Read-only diagnostics for stale workers, locks, and managed worktrees |
 | `/team id` | Print team/task-list IDs and paths |
 | `/team env <name>` | Print env vars to start a manual teammate |
 

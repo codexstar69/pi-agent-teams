@@ -3,6 +3,15 @@ import * as path from "node:path";
 import { execFile } from "node:child_process";
 import { sanitizeName } from "./names.js";
 
+function normalizeFsPath(value: string): string {
+	const resolved = path.resolve(value);
+	try {
+		return fs.realpathSync.native(resolved);
+	} catch {
+		return resolved;
+	}
+}
+
 async function execGit(args: string[], opts: { cwd: string; timeoutMs?: number } ): Promise<{ stdout: string; stderr: string }> {
 	return await new Promise((resolve, reject) => {
 		execFile(
@@ -28,11 +37,299 @@ async function execGit(args: string[], opts: { cwd: string; timeoutMs?: number }
 	});
 }
 
+function parseGitWorktreeList(raw: string): GitWorktreeEntry[] {
+	const entries: GitWorktreeEntry[] = [];
+	let current: GitWorktreeEntry | null = null;
+
+	for (const line of raw.split(/\r?\n/)) {
+		if (!line.trim()) {
+			if (current) entries.push(current);
+			current = null;
+			continue;
+		}
+
+		if (line.startsWith("worktree ")) {
+			if (current) entries.push(current);
+			current = {
+				worktreePath: normalizeFsPath(line.slice("worktree ".length).trim()),
+				detached: false,
+			};
+			continue;
+		}
+		if (!current) continue;
+		if (line.startsWith("HEAD ")) {
+			current.head = line.slice("HEAD ".length).trim();
+			continue;
+		}
+		if (line.startsWith("branch ")) {
+			current.branch = line.slice("branch ".length).trim();
+			continue;
+		}
+		if (line === "detached") {
+			current.detached = true;
+			continue;
+		}
+		if (line.startsWith("prunable ")) {
+			current.prunable = line.slice("prunable ".length).trim();
+		}
+	}
+
+	if (current) entries.push(current);
+	return entries;
+}
+
+export async function listGitWorktreeEntries(repoRoot: string): Promise<GitWorktreeEntry[]> {
+	const raw = await execGit(["worktree", "list", "--porcelain"], { cwd: repoRoot, timeoutMs: 30_000 });
+	return parseGitWorktreeList(raw.stdout);
+}
+
+export async function inspectGitWorktreePath(opts: {
+	repoRoot: string;
+	worktreePath: string;
+}): Promise<GitWorktreeInspection> {
+	const worktreePath = normalizeFsPath(opts.worktreePath);
+	const repoRoot = normalizeFsPath(opts.repoRoot);
+	const entries = await listGitWorktreeEntries(repoRoot);
+	const entry = entries.find((candidate) => candidate.worktreePath === worktreePath) ?? null;
+	const exists = fs.existsSync(worktreePath);
+	let dirty: boolean | null = null;
+	if (exists && entry) {
+		const status = await execGit(["status", "--porcelain"], { cwd: worktreePath, timeoutMs: 30_000 });
+		dirty = status.stdout.trim().length > 0;
+	}
+
+	return {
+		repoRoot,
+		worktreePath,
+		exists,
+		registered: entry !== null,
+		branch: entry?.branch ?? null,
+		detached: entry?.detached ?? false,
+		prunable: entry?.prunable ?? null,
+		dirty,
+	};
+}
+
+export function planGitWorktreeCleanupAction(inspection: GitWorktreeInspection): GitWorktreeCleanupAction {
+	if (!inspection.exists) return "skip_missing";
+	if (inspection.registered) return "git_remove";
+	return "fs_remove_only";
+}
+
 export type WorktreeResult = {
 	cwd: string;
 	warnings: string[];
 	mode: "worktree" | "shared";
 };
+
+export interface GitWorktreeEntry {
+	worktreePath: string;
+	head?: string;
+	branch?: string;
+	detached: boolean;
+	prunable?: string;
+}
+
+export interface GitWorktreeInspection {
+	repoRoot: string;
+	worktreePath: string;
+	exists: boolean;
+	registered: boolean;
+	branch: string | null;
+	detached: boolean;
+	prunable: string | null;
+	dirty: boolean | null;
+}
+
+export type GitWorktreeCleanupAction = "git_remove" | "fs_remove_only" | "skip_missing";
+
+export interface GitWorktreeCleanupResult {
+	worktreePath: string;
+	action: GitWorktreeCleanupAction;
+	removed: boolean;
+	registered: boolean;
+	warnings: string[];
+}
+
+export interface ManagedWorktreeCleanupResult {
+	results: GitWorktreeCleanupResult[];
+}
+
+function normalizeBranchName(ref: string | undefined): string | null {
+	if (!ref) return null;
+	const prefix = "refs/heads/";
+	return ref.startsWith(prefix) ? ref.slice(prefix.length) : ref;
+}
+
+function parseGitWorktreeListPorcelain(stdout: string): GitWorktreeEntry[] {
+	const entries: GitWorktreeEntry[] = [];
+	const blocks = stdout
+		.split(/\n\s*\n/g)
+		.map((block) => block.trim())
+		.filter((block) => block.length > 0);
+
+	for (const block of blocks) {
+		const lines = block.split(/\r?\n/);
+		let worktreePath: string | undefined;
+		let head: string | undefined;
+		let branch: string | undefined;
+		let detached = false;
+		let prunable: string | undefined;
+		for (const line of lines) {
+			if (line.startsWith("worktree ")) worktreePath = line.slice("worktree ".length).trim();
+			else if (line.startsWith("HEAD ")) head = line.slice("HEAD ".length).trim();
+			else if (line.startsWith("branch ")) branch = normalizeBranchName(line.slice("branch ".length).trim()) ?? undefined;
+			else if (line === "detached") detached = true;
+			else if (line.startsWith("prunable ")) prunable = line.slice("prunable ".length).trim();
+		}
+		if (!worktreePath) continue;
+		entries.push({ worktreePath, head, branch, detached, prunable });
+	}
+
+	return entries;
+}
+
+async function resolveGitRepoRoot(cwd: string): Promise<string | null> {
+	try {
+		const commonDirRaw = (await execGit(["rev-parse", "--git-common-dir"], { cwd })).stdout.trim();
+		if (!commonDirRaw) return null;
+		const commonDirAbs = path.resolve(cwd, commonDirRaw);
+		return path.dirname(commonDirAbs);
+	} catch {
+		return null;
+	}
+}
+
+export async function inspectGitWorktree(worktreePath: string): Promise<GitWorktreeInspection | null> {
+	const worktreeAbs = normalizeFsPath(worktreePath);
+	const exists = fs.existsSync(worktreeAbs);
+	if (!exists) {
+		return {
+			repoRoot: worktreeAbs,
+			worktreePath: worktreeAbs,
+			exists: false,
+			registered: false,
+			branch: null,
+			detached: false,
+			prunable: null,
+			dirty: null,
+		};
+	}
+
+	const repoRoot = await resolveGitRepoRoot(worktreeAbs);
+	if (!repoRoot) return null;
+
+	let entries: GitWorktreeEntry[] = [];
+	try {
+		entries = parseGitWorktreeListPorcelain((await execGit(["worktree", "list", "--porcelain"], { cwd: repoRoot })).stdout).map((entry) => ({
+			...entry,
+			worktreePath: normalizeFsPath(entry.worktreePath),
+		}));
+	} catch {
+		return {
+			repoRoot,
+			worktreePath: worktreeAbs,
+			exists: true,
+			registered: false,
+			branch: null,
+			detached: false,
+			prunable: null,
+			dirty: null,
+		};
+	}
+
+	const entry = entries.find((candidate) => candidate.worktreePath === worktreeAbs);
+	let dirty: boolean | null = null;
+	try {
+		const status = (await execGit(["status", "--porcelain"], { cwd: worktreeAbs })).stdout;
+		dirty = status.trim().length > 0;
+	} catch {
+		dirty = null;
+	}
+
+	return {
+		repoRoot,
+		worktreePath: worktreeAbs,
+		exists: true,
+		registered: Boolean(entry),
+		branch: entry?.branch ?? null,
+		detached: entry?.detached ?? false,
+		prunable: entry?.prunable ?? null,
+		dirty,
+	};
+}
+
+export async function removeGitWorktree(worktreePath: string): Promise<GitWorktreeCleanupResult> {
+	const worktreeAbs = normalizeFsPath(worktreePath);
+	if (!fs.existsSync(worktreeAbs)) {
+		return {
+			worktreePath: worktreeAbs,
+			action: "skip_missing",
+			removed: false,
+			registered: false,
+			warnings: [],
+		};
+	}
+
+	const inspection = await inspectGitWorktree(worktreeAbs);
+	if (!inspection) {
+		await fs.promises.rm(worktreeAbs, { recursive: true, force: true });
+		return {
+			worktreePath: worktreeAbs,
+			action: "fs_remove_only",
+			removed: !fs.existsSync(worktreeAbs),
+			registered: false,
+			warnings: ["Git inspection unavailable; removed worktree path from filesystem only."],
+		};
+	}
+
+	if (inspection.registered) {
+		await execGit(["worktree", "remove", "--force", worktreeAbs], { cwd: inspection.repoRoot, timeoutMs: 120_000 });
+		if (fs.existsSync(worktreeAbs)) {
+			await fs.promises.rm(worktreeAbs, { recursive: true, force: true });
+		}
+		return {
+			worktreePath: worktreeAbs,
+			action: "git_remove",
+			removed: !fs.existsSync(worktreeAbs),
+			registered: true,
+			warnings: [],
+		};
+	}
+
+	await fs.promises.rm(worktreeAbs, { recursive: true, force: true });
+	return {
+		worktreePath: worktreeAbs,
+		action: "fs_remove_only",
+		removed: !fs.existsSync(worktreeAbs),
+		registered: false,
+		warnings: ["Worktree path was not registered in git worktree list; removed from filesystem only."],
+	};
+}
+
+export async function cleanupManagedWorktrees(teamDir: string): Promise<ManagedWorktreeCleanupResult> {
+	const worktreesDir = path.join(teamDir, "worktrees");
+	let entries: fs.Dirent[] = [];
+	try {
+		entries = await fs.promises.readdir(worktreesDir, { withFileTypes: true });
+	} catch (err: unknown) {
+		if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
+			return { results: [] };
+		}
+		throw err;
+	}
+
+	const results: GitWorktreeCleanupResult[] = [];
+	for (const entry of entries) {
+		if (!entry.isDirectory()) continue;
+		results.push(await removeGitWorktree(path.join(worktreesDir, entry.name)));
+	}
+	return { results };
+}
+
+export function shouldCleanupGitWorktrees(env: NodeJS.ProcessEnv = process.env): boolean {
+	return env.PI_TEAMS_WORKTREE_CLEANUP === "1";
+}
 
 /**
  * Ensure a per-teammate git worktree exists, returning the cwd to use for that teammate.

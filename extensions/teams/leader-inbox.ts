@@ -25,7 +25,7 @@ export async function pollLeaderInbox(opts: {
 	style: TeamsStyle;
 	pendingPlanApprovals: Map<string, { requestId: string; name: string; taskId?: string }>;
 	enqueueHook?: (invocation: TeamsHookInvocation) => void;
-}): Promise<void> {
+}): Promise<number> {
 	const { ctx, teamId, teamDir, taskListId, leadName, style, pendingPlanApprovals, enqueueHook } = opts;
 	const strings = getTeamsStrings(style);
 
@@ -34,11 +34,13 @@ export async function pollLeaderInbox(opts: {
 		msgs = await popUnreadMessages(teamDir, TEAM_MAILBOX_NS, leadName);
 	} catch (err: unknown) {
 		ctx.ui.notify(err instanceof Error ? err.message : String(err), "warning");
-		return;
+		return 0;
 	}
-	if (!msgs.length) return;
+	if (!msgs.length) return 0;
 
+	let processed = 0;
 	for (const m of msgs) {
+		processed += 1;
 		const approved = isShutdownApproved(m.text);
 		if (approved) {
 			const name = sanitizeName(approved.from);
@@ -211,4 +213,6 @@ export async function pollLeaderInbox(opts: {
 
 		ctx.ui.notify(`Message from ${m.from}: ${m.text}`, "info");
 	}
+
+	return processed;
 }

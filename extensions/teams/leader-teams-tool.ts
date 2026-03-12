@@ -15,6 +15,7 @@ import {
 	resolveTeammateModelSelection,
 	type TeammateModelSource,
 } from "./model-policy.js";
+import { getMaxWorkersLimit, getOnlineWorkerNames } from "./max-workers-policy.js";
 import {
 	getTeamsHookFailureAction,
 	getTeamsHookFollowupOwnerPolicy,
@@ -945,6 +946,8 @@ export function registerTeamsTool(opts: {
 			const spawnThinking = params.thinking;
 
 			let teammateNames: string[] = [];
+			const spawned: string[] = [];
+			const warnings: string[] = [];
 			const explicit = params.teammates;
 			if (explicit && explicit.length) {
 				teammateNames = explicit.map((n) => sanitizeName(n)).filter((n) => n.length > 0);
@@ -956,7 +959,10 @@ export function registerTeamsTool(opts: {
 
 			if (teammateNames.length === 0) {
 				const maxTeammates = Math.max(1, Math.min(16, params.maxTeammates ?? 4));
-				const count = Math.min(maxTeammates, inputTasks.length);
+				const policyLimit = getMaxWorkersLimit(process.env);
+				const activeWorkers = getOnlineWorkerNames({ teammates, teamConfig: cfg });
+				const availableSlots = policyLimit === null ? Number.POSITIVE_INFINITY : Math.max(0, policyLimit - activeWorkers.length);
+				const count = Math.min(maxTeammates, inputTasks.length, availableSlots);
 				const taken = new Set(teammates.keys());
 				const naming = getTeamsNamingRules(style);
 				teammateNames =
@@ -968,10 +974,19 @@ export function registerTeamsTool(opts: {
 							taken,
 							fallbackBase: naming.autoNameStrategy.fallbackBase,
 						});
+				if (policyLimit !== null && count === 0) {
+					warnings.push(
+						`Max workers limit reached (${activeWorkers.length}/${policyLimit}). Reuse existing workers or raise PI_TEAMS_MAX_WORKERS.`,
+					);
+				}
 			}
 
-			const spawned: string[] = [];
-			const warnings: string[] = [];
+			if (teammateNames.length === 0) {
+				return {
+					content: [{ type: "text", text: "No workers available to delegate tasks. Reuse existing workers or raise PI_TEAMS_MAX_WORKERS." }],
+					details: { action, teamId, taskListId: effectiveTlId, warnings },
+				};
+			}
 
 			for (const name of teammateNames) {
 				if (signal?.aborted) break;

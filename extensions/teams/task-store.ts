@@ -1,5 +1,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import {
+	applyTaskLeaseMetadata,
+	createTaskLease,
+	readTaskLeaseMetadata,
+	refreshTaskLease,
+	shouldRecoverLeasedTask,
+} from "./heartbeat-lease.js";
+import { appendTeamEvent } from "./event-log.js";
 import { withLock } from "./fs-lock.js";
 import { sanitizeName } from "./names.js";
 
@@ -18,12 +26,95 @@ export interface TeamTask {
 	updatedAt: string;
 }
 
+export interface RetryableFailureOptions {
+	reason?: string;
+	partialResult?: string;
+	failureKind?: string;
+	nowMs?: number;
+	baseDelayMs?: number;
+	maxAttempts?: number;
+	extraMetadata?: Record<string, unknown>;
+}
+
+export type TaskPriority = "low" | "normal" | "high" | "urgent";
+
 export function getTaskListDir(teamDir: string, taskListId: string): string {
 	return path.join(teamDir, "tasks", sanitizeName(taskListId));
 }
 
 function taskPath(taskListDir: string, taskId: string): string {
 	return path.join(taskListDir, `${sanitizeName(taskId)}.json`);
+}
+
+export interface TaskStoreCacheStats {
+	fileReads: number;
+	fileCacheHits: number;
+	listReads: number;
+	listCacheHits: number;
+	invalidations: number;
+}
+
+type TaskFileCacheEntry = {
+	signature: string;
+	task: TeamTask | null;
+};
+
+type TaskListCacheEntry = {
+	signature: string;
+	tasks: TeamTask[];
+};
+
+const taskFileCache = new Map<string, TaskFileCacheEntry>();
+const taskListCache = new Map<string, TaskListCacheEntry>();
+const taskStoreCacheStats: TaskStoreCacheStats = {
+	fileReads: 0,
+	fileCacheHits: 0,
+	listReads: 0,
+	listCacheHits: 0,
+	invalidations: 0,
+};
+
+function cloneTask(task: TeamTask | null): TeamTask | null {
+	if (!task) return null;
+	return {
+		...task,
+		blocks: [...task.blocks],
+		blockedBy: [...task.blockedBy],
+		metadata: task.metadata ? { ...task.metadata } : undefined,
+	};
+}
+
+function cloneTasks(tasks: TeamTask[]): TeamTask[] {
+	return tasks.map((task) => cloneTask(task)).filter((task): task is TeamTask => task !== null);
+}
+
+function getTaskFileSignature(stat: fs.Stats): string {
+	return `${stat.size}:${Math.round(stat.mtimeMs)}`;
+}
+
+function invalidateTaskFileCache(file: string): void {
+	taskFileCache.delete(file);
+	taskListCache.delete(path.dirname(file));
+	taskStoreCacheStats.invalidations += 1;
+}
+
+function invalidateTaskListCache(taskListDir: string): void {
+	taskListCache.delete(taskListDir);
+	taskStoreCacheStats.invalidations += 1;
+}
+
+export function clearTaskStoreCache(): void {
+	taskFileCache.clear();
+	taskListCache.clear();
+	taskStoreCacheStats.fileReads = 0;
+	taskStoreCacheStats.fileCacheHits = 0;
+	taskStoreCacheStats.listReads = 0;
+	taskStoreCacheStats.listCacheHits = 0;
+	taskStoreCacheStats.invalidations = 0;
+}
+
+export function getTaskStoreCacheStats(): TaskStoreCacheStats {
+	return { ...taskStoreCacheStats };
 }
 
 async function ensureDir(p: string): Promise<void> {
@@ -57,6 +148,56 @@ async function writeJsonAtomic(file: string, data: unknown): Promise<void> {
 	const tmp = `${file}.tmp.${process.pid}.${Date.now()}`;
 	await fs.promises.writeFile(tmp, JSON.stringify(data, null, 2) + "\n", "utf8");
 	await fs.promises.rename(tmp, file);
+	invalidateTaskFileCache(file);
+}
+
+async function readTaskFromFileCached(file: string, signature?: string): Promise<TeamTask | null> {
+	let effectiveSignature = signature;
+	if (!effectiveSignature) {
+		try {
+			const stat = await fs.promises.stat(file);
+			effectiveSignature = getTaskFileSignature(stat);
+		} catch {
+			invalidateTaskFileCache(file);
+			return null;
+		}
+	}
+
+	const cached = taskFileCache.get(file);
+	if (cached && cached.signature === effectiveSignature) {
+		taskStoreCacheStats.fileCacheHits += 1;
+		return cloneTask(cached.task);
+	}
+
+	taskStoreCacheStats.fileReads += 1;
+	const obj = await readJson(file);
+	const task = coerceTask(obj);
+	taskFileCache.set(file, { signature: effectiveSignature, task: cloneTask(task) });
+	return cloneTask(task);
+}
+
+async function appendTaskEvent(
+	teamDir: string,
+	event: {
+		kind: string;
+		taskListId: string;
+		taskId?: string;
+		member?: string;
+		data?: Record<string, unknown>;
+	},
+): Promise<void> {
+	try {
+		await appendTeamEvent(teamDir, {
+			ts: new Date().toISOString(),
+			kind: event.kind,
+			taskListId: event.taskListId,
+			taskId: event.taskId,
+			member: event.member,
+			data: event.data,
+		});
+	} catch {
+		// event logging is best-effort and should never break task operations
+	}
 }
 
 function isStatus(s: unknown): s is TaskStatus {
@@ -83,6 +224,87 @@ function coerceTask(obj: unknown): TeamTask | null {
 		createdAt: typeof obj.createdAt === "string" ? obj.createdAt : now,
 		updatedAt: typeof obj.updatedAt === "string" ? obj.updatedAt : now,
 	};
+}
+
+function getMetadataInt(task: TeamTask, key: string): number {
+	const value = task.metadata?.[key];
+	if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return 0;
+	return Math.floor(value);
+}
+
+function getMetadataBool(task: TeamTask, key: string): boolean {
+	return task.metadata?.[key] === true;
+}
+
+function getCooldownUntilMs(task: TeamTask): number | null {
+	const value = task.metadata?.cooldownUntil;
+	if (typeof value !== "string") return null;
+	const parsed = Date.parse(value);
+	return Number.isFinite(parsed) ? parsed : null;
+}
+
+export function getTaskPriority(task: TeamTask): TaskPriority {
+	const raw = task.metadata?.priority;
+	if (raw === "low" || raw === "normal" || raw === "high" || raw === "urgent") return raw;
+	return "normal";
+}
+
+export function getTaskPriorityRank(priority: TaskPriority): number {
+	switch (priority) {
+		case "urgent":
+			return 3;
+		case "high":
+			return 2;
+		case "normal":
+			return 1;
+		case "low":
+			return 0;
+	}
+}
+
+function compareTaskPriority(a: TeamTask, b: TeamTask): number {
+	const rankDiff = getTaskPriorityRank(getTaskPriority(b)) - getTaskPriorityRank(getTaskPriority(a));
+	if (rankDiff !== 0) return rankDiff;
+	return a.id.localeCompare(b.id, undefined, { numeric: true });
+}
+
+function withoutTaskLeaseMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+	if (!metadata) return undefined;
+	const next = { ...metadata };
+	delete next.taskLease;
+	return Object.keys(next).length > 0 ? next : undefined;
+}
+
+function withTaskLeaseMetadata(
+	metadata: Record<string, unknown> | undefined,
+	owner: string,
+	opts: { nowMs?: number; leaseDurationMs?: number } = {},
+): Record<string, unknown> {
+	const base = withoutTaskLeaseMetadata(metadata) ?? {};
+	const lease = createTaskLease(owner, {
+		nowMs: opts.nowMs,
+		leaseDurationMs: opts.leaseDurationMs,
+	});
+	return applyTaskLeaseMetadata(base, lease);
+}
+
+export function isTaskRetryExhausted(task: TeamTask): boolean {
+	return getMetadataBool(task, "retryExhausted");
+}
+
+export function isTaskCoolingDown(task: TeamTask, nowMs = Date.now()): boolean {
+	if (isTaskRetryExhausted(task)) return false;
+	const cooldownUntilMs = getCooldownUntilMs(task);
+	if (cooldownUntilMs === null) return false;
+	return cooldownUntilMs > nowMs;
+}
+
+function isTaskClaimableNow(task: TeamTask, nowMs = Date.now()): boolean {
+	if (task.status !== "pending") return false;
+	if (task.owner) return false;
+	if (isTaskRetryExhausted(task)) return false;
+	if (isTaskCoolingDown(task, nowMs)) return false;
+	return true;
 }
 
 async function allocateTaskId(taskListDir: string): Promise<string> {
@@ -142,23 +364,37 @@ export async function listTasks(teamDir: string, taskListId: string): Promise<Te
 			.filter((e) => e.isFile() && e.name.endsWith(".json"))
 			.map((e) => e.name)
 			.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+		const fileInfos = await Promise.all(
+			files.map(async (name) => {
+				const file = path.join(dir, name);
+				const stat = await fs.promises.stat(file);
+				return { file, signature: getTaskFileSignature(stat) };
+			}),
+		);
+		const listSignature = fileInfos.map((info) => `${path.basename(info.file)}:${info.signature}`).join("|");
+		const cached = taskListCache.get(dir);
+		if (cached && cached.signature === listSignature) {
+			taskStoreCacheStats.listCacheHits += 1;
+			return cloneTasks(cached.tasks);
+		}
 
+		taskStoreCacheStats.listReads += 1;
 		const out: TeamTask[] = [];
-		for (const f of files) {
-			const obj = await readJson(path.join(dir, f));
-			const task = coerceTask(obj);
+		for (const info of fileInfos) {
+			const task = await readTaskFromFileCached(info.file, info.signature);
 			if (task) out.push(task);
 		}
-		return out;
+		taskListCache.set(dir, { signature: listSignature, tasks: cloneTasks(out) });
+		return cloneTasks(out);
 	} catch {
+		invalidateTaskListCache(dir);
 		return [];
 	}
 }
 
 export async function getTask(teamDir: string, taskListId: string, taskId: string): Promise<TeamTask | null> {
 	const dir = getTaskListDir(teamDir, taskListId);
-	const obj = await readJson(taskPath(dir, taskId));
-	return coerceTask(obj);
+	return await readTaskFromFileCached(taskPath(dir, taskId));
 }
 
 export async function createTask(
@@ -183,6 +419,13 @@ export async function createTask(
 	};
 
 	await writeJsonAtomic(taskPath(dir, id), task);
+	await appendTaskEvent(teamDir, {
+		kind: "task_created",
+		taskListId,
+		taskId: task.id,
+		member: input.owner,
+		data: { subject: task.subject, owner: task.owner ?? null },
+	});
 	return task;
 }
 
@@ -237,23 +480,35 @@ export async function claimTask(
 	taskListId: string,
 	taskId: string,
 	agentName: string,
-	opts: { checkAgentBusy?: boolean } = {},
+	opts: { checkAgentBusy?: boolean; nowMs?: number; leaseDurationMs?: number } = {},
 ): Promise<TeamTask | null> {
 	if (opts.checkAgentBusy) {
 		const busy = await agentHasActiveTask(teamDir, taskListId, agentName);
 		if (busy) return null;
 	}
 
-	return await updateTask(teamDir, taskListId, taskId, (cur) => {
-		// Not claimable
-		if (cur.status !== "pending") return cur;
-		if (cur.owner) return cur;
+	const updated = await updateTask(teamDir, taskListId, taskId, (cur) => {
+		if (!isTaskClaimableNow(cur, opts.nowMs)) return cur;
 		return {
 			...cur,
 			owner: agentName,
 			status: "in_progress",
+			metadata: withTaskLeaseMetadata(cur.metadata, agentName, {
+				nowMs: opts.nowMs,
+				leaseDurationMs: opts.leaseDurationMs,
+			}),
 		};
 	});
+	if (updated?.owner === agentName && updated.status === "in_progress") {
+		await appendTaskEvent(teamDir, {
+			kind: "task_claimed",
+			taskListId,
+			taskId: updated.id,
+			member: agentName,
+			data: { owner: agentName },
+		});
+	}
+	return updated;
 }
 
 /**
@@ -264,12 +519,30 @@ export async function startAssignedTask(
 	taskListId: string,
 	taskId: string,
 	agentName: string,
+	opts: { nowMs?: number; leaseDurationMs?: number } = {},
 ): Promise<TeamTask | null> {
-	return await updateTask(teamDir, taskListId, taskId, (cur) => {
+	const updated = await updateTask(teamDir, taskListId, taskId, (cur) => {
 		if (cur.owner !== agentName) return cur;
 		if (cur.status !== "pending") return cur;
-		return { ...cur, status: "in_progress" };
+		return {
+			...cur,
+			status: "in_progress",
+			metadata: withTaskLeaseMetadata(cur.metadata, agentName, {
+				nowMs: opts.nowMs,
+				leaseDurationMs: opts.leaseDurationMs,
+			}),
+		};
 	});
+	if (updated?.owner === agentName && updated.status === "in_progress") {
+		await appendTaskEvent(teamDir, {
+			kind: "task_started",
+			taskListId,
+			taskId: updated.id,
+			member: agentName,
+			data: { owner: agentName },
+		});
+	}
+	return updated;
 }
 
 export async function completeTask(
@@ -279,14 +552,24 @@ export async function completeTask(
 	agentName: string,
 	result?: string,
 ): Promise<TeamTask | null> {
-	return await updateTask(teamDir, taskListId, taskId, (cur) => {
+	const updated = await updateTask(teamDir, taskListId, taskId, (cur) => {
 		if (cur.owner !== agentName) return cur;
 		if (cur.status === "completed") return cur;
-		const metadata = { ...(cur.metadata ?? {}) };
+		const metadata = withoutTaskLeaseMetadata(cur.metadata) ?? {};
 		if (result) metadata.result = result;
 		metadata.completedAt = new Date().toISOString();
 		return { ...cur, status: "completed", metadata };
 	});
+	if (updated?.status === "completed") {
+		await appendTaskEvent(teamDir, {
+			kind: "task_completed",
+			taskListId,
+			taskId: updated.id,
+			member: agentName,
+			data: { owner: agentName },
+		});
+	}
+	return updated;
 }
 
 export async function unassignTask(
@@ -301,7 +584,7 @@ export async function unassignTask(
 		if (cur.owner !== agentName) return cur;
 		if (cur.status === "completed") return cur;
 
-		const metadata = { ...(cur.metadata ?? {}) };
+		const metadata = withoutTaskLeaseMetadata(cur.metadata) ?? {};
 		if (reason) metadata.unassignedReason = reason;
 		metadata.unassignedAt = new Date().toISOString();
 		if (extraMetadata) Object.assign(metadata, extraMetadata);
@@ -332,7 +615,7 @@ export async function unassignTasksForAgent(
 			if (cur.owner !== agentName) return cur;
 			if (cur.status === "completed") return cur;
 
-			const metadata = { ...(cur.metadata ?? {}) };
+			const metadata = withoutTaskLeaseMetadata(cur.metadata) ?? {};
 			if (reason) metadata.unassignedReason = reason;
 			metadata.unassignedAt = new Date().toISOString();
 			return {
@@ -347,6 +630,123 @@ export async function unassignTasksForAgent(
 	return changed;
 }
 
+export async function refreshTaskLeaseHeartbeat(
+	teamDir: string,
+	taskListId: string,
+	taskId: string,
+	agentName: string,
+	opts: { nowMs?: number; leaseDurationMs?: number } = {},
+): Promise<TeamTask | null> {
+	return await updateTask(teamDir, taskListId, taskId, (cur) => {
+		if (cur.owner !== agentName) return cur;
+		if (cur.status !== "in_progress") return cur;
+
+		const existingLease = readTaskLeaseMetadata(cur.metadata);
+		const nextLease = existingLease
+			? refreshTaskLease(existingLease, agentName, { nowMs: opts.nowMs, leaseDurationMs: opts.leaseDurationMs })
+			: createTaskLease(agentName, { nowMs: opts.nowMs, leaseDurationMs: opts.leaseDurationMs });
+		if (!nextLease) return cur;
+
+		return {
+			...cur,
+			metadata: applyTaskLeaseMetadata(withoutTaskLeaseMetadata(cur.metadata) ?? {}, nextLease),
+		};
+	});
+}
+
+export async function recoverLeasedTaskIfStale(
+	teamDir: string,
+	taskListId: string,
+	taskId: string,
+	opts: { ownerLastSeenAt?: string; nowMs?: number; heartbeatStaleMs?: number } = {},
+): Promise<TeamTask | null> {
+	const updated = await updateTask(teamDir, taskListId, taskId, (cur) => {
+		if (cur.status !== "in_progress") return cur;
+		const decision = shouldRecoverLeasedTask({
+			taskMetadata: cur.metadata,
+			ownerLastSeenAt: opts.ownerLastSeenAt,
+			nowMs: opts.nowMs,
+			heartbeatStaleMs: opts.heartbeatStaleMs,
+		});
+		if (!decision.recover) return cur;
+
+		const metadata = withoutTaskLeaseMetadata(cur.metadata) ?? {};
+		metadata.leaseRecoveryReason = decision.reason;
+		metadata.leaseRecoveryAt = new Date(opts.nowMs ?? Date.now()).toISOString();
+		return {
+			...cur,
+			owner: undefined,
+			status: "pending",
+			metadata,
+		};
+	});
+	if (updated?.status === "pending" && updated.owner === undefined && updated.metadata?.leaseRecoveryAt) {
+		await appendTaskEvent(teamDir, {
+			kind: "task_recovered",
+			taskListId,
+			taskId: updated.id,
+			data: { reason: updated.metadata.leaseRecoveryReason },
+		});
+	}
+	return updated;
+}
+
+export async function markTaskRetryableFailure(
+	teamDir: string,
+	taskListId: string,
+	taskId: string,
+	agentName: string,
+	opts: RetryableFailureOptions = {},
+): Promise<TeamTask | null> {
+	const nowMs = opts.nowMs ?? Date.now();
+	const nowIso = new Date(nowMs).toISOString();
+	const baseDelayMs = Math.max(0, Math.floor(opts.baseDelayMs ?? 5_000));
+	const maxAttempts = Math.max(1, Math.floor(opts.maxAttempts ?? 3));
+
+	const updated = await updateTask(teamDir, taskListId, taskId, (cur) => {
+		if (cur.owner !== agentName) return cur;
+		if (cur.status === "completed") return cur;
+
+		const retryCount = getMetadataInt(cur, "retryCount") + 1;
+		const retryExhausted = retryCount >= maxAttempts;
+		const metadata = withoutTaskLeaseMetadata(cur.metadata) ?? {};
+		const cooldownDelayMs = retryExhausted ? 0 : baseDelayMs * 2 ** Math.max(0, retryCount - 1);
+
+		metadata.retryCount = retryCount;
+		metadata.retryLimit = maxAttempts;
+		metadata.retryExhausted = retryExhausted;
+		metadata.lastFailureAt = nowIso;
+		metadata.failureKind = opts.failureKind ?? "retryable";
+		if (opts.reason) metadata.lastFailureReason = opts.reason;
+		if (opts.partialResult) metadata.partialResult = opts.partialResult;
+		metadata.cooldownDelayMs = cooldownDelayMs;
+		if (retryExhausted) delete metadata.cooldownUntil;
+		else metadata.cooldownUntil = new Date(nowMs + cooldownDelayMs).toISOString();
+		if (opts.extraMetadata) Object.assign(metadata, opts.extraMetadata);
+
+		return {
+			...cur,
+			owner: undefined,
+			status: "pending",
+			metadata,
+		};
+	});
+	if (updated?.status === "pending") {
+		await appendTaskEvent(teamDir, {
+			kind: "task_retryable_failure",
+			taskListId,
+			taskId: updated.id,
+			member: agentName,
+			data: {
+				retryCount: updated.metadata?.retryCount,
+				retryExhausted: updated.metadata?.retryExhausted,
+				reason: updated.metadata?.lastFailureReason,
+			},
+		});
+	}
+	return updated;
+}
+
 /**
  * Find and claim the first available task:
  * - pending
@@ -357,7 +757,7 @@ export async function claimNextAvailableTask(
 	teamDir: string,
 	taskListId: string,
 	agentName: string,
-	opts: { checkAgentBusy?: boolean } = {},
+	opts: { checkAgentBusy?: boolean; nowMs?: number; leaseDurationMs?: number } = {},
 ): Promise<TeamTask | null> {
 	if (opts.checkAgentBusy) {
 		const busy = await agentHasActiveTask(teamDir, taskListId, agentName);
@@ -365,12 +765,16 @@ export async function claimNextAvailableTask(
 	}
 
 	const tasks = await listTasks(teamDir, taskListId);
-	for (const t of tasks) {
-		if (t.status !== "pending") continue;
-		if (t.owner) continue;
+	const orderedTasks = tasks.slice().sort(compareTaskPriority);
+	for (const t of orderedTasks) {
+		if (!isTaskClaimableNow(t, opts.nowMs)) continue;
 		if (await isTaskBlocked(teamDir, taskListId, t)) continue;
 
-		const claimed = await claimTask(teamDir, taskListId, t.id, agentName, { checkAgentBusy: false });
+		const claimed = await claimTask(teamDir, taskListId, t.id, agentName, {
+			checkAgentBusy: false,
+			nowMs: opts.nowMs,
+			leaseDurationMs: opts.leaseDurationMs,
+		});
 		if (claimed && claimed.owner === agentName && claimed.status === "in_progress") return claimed;
 	}
 	return null;
@@ -391,6 +795,26 @@ function uniqStrings(xs: string[]): string[] {
 	return out;
 }
 
+function findDependencyPath(
+	taskById: ReadonlyMap<string, TeamTask>,
+	startId: string,
+	targetId: string,
+	visiting = new Set<string>(),
+): string[] | null {
+	if (startId === targetId) return [startId];
+	if (visiting.has(startId)) return null;
+	visiting.add(startId);
+
+	const start = taskById.get(startId);
+	for (const nextId of start?.blockedBy ?? []) {
+		const subPath = findDependencyPath(taskById, nextId, targetId, visiting);
+		if (subPath) return [startId, ...subPath];
+	}
+
+	visiting.delete(startId);
+	return null;
+}
+
 /**
  * Add a dependency edge: taskId is blockedBy depId (and depId blocks taskId).
  */
@@ -407,6 +831,17 @@ export async function addTaskDependency(
 	if (!task) return { ok: false, error: `Task not found: ${taskId}` };
 	const dep = await getTask(teamDir, taskListId, depId);
 	if (!dep) return { ok: false, error: `Dependency task not found: ${depId}` };
+
+	const allTasks = await listTasks(teamDir, taskListId);
+	const taskById = new Map(allTasks.map((t) => [t.id, t]));
+	const cyclePath = findDependencyPath(taskById, depId, taskId);
+	if (cyclePath) {
+		const cycleText = [taskId, ...cyclePath].join(" -> ");
+		return {
+			ok: false,
+			error: `Dependency cycle detected: ${cycleText}`,
+		};
+	}
 
 	const updatedTask = await updateTask(teamDir, taskListId, taskId, (cur) => ({
 		...cur,
@@ -533,6 +968,7 @@ export async function clearTasks(
 
 		try {
 			await fs.promises.unlink(file);
+			invalidateTaskFileCache(file);
 			deletedTaskIds.push(taskIdFromName);
 		} catch (err: unknown) {
 			if (isErrnoException(err) && err.code === "ENOENT") continue;

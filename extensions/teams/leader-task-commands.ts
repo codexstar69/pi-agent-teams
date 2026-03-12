@@ -1,5 +1,8 @@
 import * as path from "node:path";
 import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import type { TeamEvent } from "./event-log.js";
+import { readRecentTeamEvents } from "./event-log.js";
+import { readTaskLeaseMetadata } from "./heartbeat-lease.js";
 import { writeToMailbox } from "./mailbox.js";
 import { sanitizeName } from "./names.js";
 import { getTeamDir } from "./paths.js";
@@ -10,6 +13,7 @@ import {
 	createTask,
 	formatTaskLine,
 	getTask,
+	getTaskPriority,
 	isTaskBlocked,
 	removeTaskDependency,
 	updateTask,
@@ -26,6 +30,89 @@ function parseAssigneePrefix(text: string): { assignee?: string; text: string } 
 	const rest = m[2];
 	if (!assignee || !rest) return { text };
 	return { assignee, text: rest };
+}
+
+function getMetadataNumber(task: TeamTask, key: string): number | null {
+	const value = task.metadata?.[key];
+	return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function getMetadataString(task: TeamTask, key: string): string | null {
+	const value = task.metadata?.[key];
+	if (typeof value !== "string") return null;
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : null;
+}
+
+function formatRecentTaskEvent(event: TeamEvent): string {
+	const bits = [event.ts, event.kind];
+	if (event.member) bits.push(event.member);
+	if (event.data && typeof event.data.reason === "string" && event.data.reason.trim()) bits.push(event.data.reason.trim());
+	return bits.join(" • ");
+}
+
+export function buildTaskShowLines(
+	task: TeamTask,
+	opts: { blocked: boolean; recentEvents?: readonly TeamEvent[] },
+): string[] {
+	const lines: string[] = [];
+	lines.push(`#${task.id} ${task.subject}`);
+	lines.push(`status: ${task.status}${opts.blocked ? " (blocked)" : ""}${task.owner ? ` • owner: ${task.owner}` : ""}`);
+	lines.push(`priority: ${getTaskPriority(task)}`);
+	if (task.blockedBy.length) lines.push(`deps: ${task.blockedBy.join(", ")}`);
+	if (task.blocks.length) lines.push(`blocks: ${task.blocks.join(", ")}`);
+
+	const retryCount = getMetadataNumber(task, "retryCount");
+	const retryLimit = getMetadataNumber(task, "retryLimit");
+	const retryExhausted = task.metadata?.retryExhausted === true;
+	if (retryCount !== null || retryExhausted) {
+		const retryLabel = retryExhausted
+			? `retry: exhausted${retryCount !== null && retryLimit !== null ? ` (${retryCount}/${retryLimit})` : ""}`
+			: retryCount !== null && retryLimit !== null
+				? `retry: ${retryCount}/${retryLimit}`
+				: `retry: ${String(retryCount ?? 0)}`;
+		lines.push(retryLabel);
+	}
+
+	const cooldownUntil = getMetadataString(task, "cooldownUntil");
+	if (cooldownUntil) lines.push(`cooldownUntil: ${cooldownUntil}`);
+
+	const lease = readTaskLeaseMetadata(task.metadata);
+	if (lease) {
+		const tokenPreview = lease.token.length > 8 ? lease.token.slice(0, 8) : lease.token;
+		lines.push(`lease: owner=${lease.owner} expiresAt=${lease.expiresAt} token=${tokenPreview}`);
+	}
+
+	const leaseRecoveryReason = getMetadataString(task, "leaseRecoveryReason");
+	if (leaseRecoveryReason) lines.push(`leaseRecoveryReason: ${leaseRecoveryReason}`);
+
+	lines.push("");
+	lines.push(task.description);
+
+	const result = getMetadataString(task, "result");
+	if (result) {
+		lines.push("");
+		lines.push("result:");
+		lines.push(result);
+	}
+
+	const qualityGateStatusRaw = task.metadata?.["qualityGateStatus"];
+	const qualityGateStatus =
+		qualityGateStatusRaw === "failed" || qualityGateStatusRaw === "passed" ? qualityGateStatusRaw : null;
+	const qualityGateSummary = getMetadataString(task, "qualityGateSummary");
+	if (qualityGateStatus) {
+		lines.push("");
+		lines.push(`quality gate: ${qualityGateStatus}${qualityGateSummary ? ` • ${qualityGateSummary}` : ""}`);
+	}
+
+	const recentEvents = (opts.recentEvents ?? []).filter((event) => event.taskId === task.id).slice(-3);
+	if (recentEvents.length > 0) {
+		lines.push("");
+		lines.push("recent events:");
+		for (const event of recentEvents) lines.push(`- ${formatRecentTaskEvent(event)}`);
+	}
+
+	return lines;
 }
 
 export async function handleTeamTaskCommand(opts: {
@@ -182,37 +269,8 @@ export async function handleTeamTaskCommand(opts: {
 			}
 
 			const blocked = task.status !== "completed" && (await isTaskBlocked(teamDir, effectiveTlId, task));
-
-			const lines: string[] = [];
-			lines.push(`#${task.id} ${task.subject}`);
-			lines.push(
-				`status: ${task.status}${blocked ? " (blocked)" : ""}${task.owner ? ` • owner: ${task.owner}` : ""}`,
-			);
-			if (task.blockedBy.length) lines.push(`deps: ${task.blockedBy.join(", ")}`);
-			if (task.blocks.length) lines.push(`blocks: ${task.blocks.join(", ")}`);
-			lines.push("");
-			lines.push(task.description);
-
-			const result = typeof task.metadata?.result === "string" ? task.metadata.result : undefined;
-			if (result) {
-				lines.push("");
-				lines.push("result:");
-				lines.push(result);
-			}
-
-			const qualityGateStatusRaw = task.metadata?.["qualityGateStatus"];
-			const qualityGateStatus =
-				qualityGateStatusRaw === "failed" || qualityGateStatusRaw === "passed" ? qualityGateStatusRaw : null;
-			const qualityGateSummaryRaw = task.metadata?.["qualityGateSummary"];
-			const qualityGateSummary =
-				typeof qualityGateSummaryRaw === "string" && qualityGateSummaryRaw.trim().length > 0
-					? qualityGateSummaryRaw.trim()
-					: null;
-			if (qualityGateStatus) {
-				lines.push("");
-				lines.push(`quality gate: ${qualityGateStatus}${qualityGateSummary ? ` • ${qualityGateSummary}` : ""}`);
-			}
-
+			const recentEvents = await readRecentTeamEvents(teamDir, { limit: 50 });
+			const lines = buildTaskShowLines(task, { blocked, recentEvents });
 			ctx.ui.notify(lines.join("\n"), "info");
 			return;
 		}

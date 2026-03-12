@@ -3,8 +3,10 @@ import type { Theme, ThemeColor, ExtensionCommandContext } from "@mariozechner/p
 import type { TeammateRpc, TeammateStatus } from "./teammate-rpc.js";
 import type { ActivityTracker, TranscriptLog, TranscriptEntry } from "./activity-tracker.js";
 import type { TeamTask } from "./task-store.js";
+import { getTaskPriority } from "./task-store.js";
 import type { TeamConfig, TeamMember } from "./team-config.js";
 import type { TeamsStyle } from "./teams-style.js";
+import { readTaskLeaseMetadata } from "./heartbeat-lease.js";
 import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
 import {
 	STATUS_COLOR,
@@ -700,6 +702,27 @@ export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: 
 						);
 						lines.push(truncateToWidth(` ${theme.fg("dim", "blocking:")} ${theme.fg("muted", blockSummary)}`, width));
 						lines.push(truncateToWidth(` ${theme.fg("dim", "desc:")} ${theme.fg("muted", descPreview)}`, width));
+						const priority = getTaskPriority(selectedTask);
+						const retryCount = selectedTask.metadata?.["retryCount"];
+						const retryLimit = selectedTask.metadata?.["retryLimit"];
+						const retryExhausted = selectedTask.metadata?.["retryExhausted"] === true;
+						const cooldownUntil = typeof selectedTask.metadata?.["cooldownUntil"] === "string" ? selectedTask.metadata.cooldownUntil : null;
+						const lease = readTaskLeaseMetadata(selectedTask.metadata);
+						const leaseRecoveryReason = typeof selectedTask.metadata?.["leaseRecoveryReason"] === "string" ? selectedTask.metadata.leaseRecoveryReason : null;
+						lines.push(truncateToWidth(` ${theme.fg("dim", "priority:")} ${theme.fg(priority === "urgent" ? "error" : priority === "high" ? "warning" : "muted", priority)}`, width));
+						if (typeof retryCount === "number") {
+							const retrySummary = typeof retryLimit === "number" ? `${retryCount}/${retryLimit}` : String(retryCount);
+							lines.push(truncateToWidth(` ${theme.fg("dim", "retry:")} ${theme.fg(retryExhausted ? "error" : "muted", retryExhausted ? `exhausted (${retrySummary})` : retrySummary)}`, width));
+						}
+						if (cooldownUntil) {
+							lines.push(truncateToWidth(` ${theme.fg("dim", "cooldown:")} ${theme.fg("muted", cooldownUntil)}`, width));
+						}
+						if (lease) {
+							lines.push(truncateToWidth(` ${theme.fg("dim", "lease:")} ${theme.fg("muted", `owner=${lease.owner} expiresAt=${lease.expiresAt}`)}`, width));
+						}
+						if (leaseRecoveryReason) {
+							lines.push(truncateToWidth(` ${theme.fg("dim", "recovered:")} ${theme.fg("warning", leaseRecoveryReason)}`, width));
+						}
 						const qgStatus = getQualityGateStatus(selectedTask);
 						if (qgStatus) {
 							const qgSummary = getQualityGateSummary(selectedTask);
