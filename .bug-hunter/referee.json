@@ -1,32 +1,32 @@
 [
   {
-    "bugId": "BUG-10",
+    "bugId": "BUG-13",
     "verdict": "REAL_BUG",
     "trueSeverity": "Medium",
-    "confidenceScore": 98,
+    "confidenceScore": 96,
     "confidenceLabel": "high",
     "verificationMode": "INDEPENDENTLY_VERIFIED",
-    "analysisSummary": "Confirmed by re-reading stop() and Node child_process docs. The fallback SIGKILL path is unreachable in the intended failure case because the code nulls the process reference immediately and also gates escalation on `proc.killed`, which only means SIGTERM was delivered. If a child ignores SIGTERM, stop()/kill/shutdown can leave an orphan teammate running.",
-    "suggestedFix": "Capture the ChildProcess in a local variable, clear the escalation timer on close, and gate SIGKILL on `exitCode`/`signalCode` still being null instead of `killed`."
+    "analysisSummary": "Confirmed by tracing spawnTeammate() and TeammateRpc.start(). The child process is created before the ready handshake, and handshake failure only unwinds bookkeeping. Without an explicit termination step, a failed spawn attempt can leave a live orphan teammate process behind.",
+    "suggestedFix": "On RPC ready-handshake failure, immediately terminate the spawned child with the same forced-termination path used by stop(), then clear the stored process reference before rethrowing."
   },
   {
-    "bugId": "BUG-11",
+    "bugId": "BUG-14",
     "verdict": "REAL_BUG",
     "trueSeverity": "Medium",
-    "confidenceScore": 95,
+    "confidenceScore": 97,
     "confidenceLabel": "high",
     "verificationMode": "INDEPENDENTLY_VERIFIED",
-    "analysisSummary": "Confirmed by tracing `/team cleanup` into leader refresh. cleanupTeamDir removes the active team directory, but the immediate refresh path recreates config.json through ensureTeamConfig() whenever config is missing. The command therefore cannot keep the team deleted; background refresh also resurrects it.",
-    "suggestedFix": "Suppress implicit config bootstrap for the cleaned team until a deliberate action recreates it, then refresh in-memory state without calling ensureTeamConfig()."
+    "analysisSummary": "Confirmed by reading stop() and send(). stop() awaited a full RPC abort request before signalling the child process. If the child is alive but non-responsive, teardown can hang on the 60-second RPC timeout per worker before SIGTERM/SIGKILL is attempted.",
+    "suggestedFix": "Make abort cooperative but bounded—race it against a short timeout, then start process termination immediately regardless of RPC responsiveness."
   },
   {
-    "bugId": "BUG-12",
+    "bugId": "BUG-15",
     "verdict": "REAL_BUG",
     "trueSeverity": "Medium",
-    "confidenceScore": 93,
+    "confidenceScore": 91,
     "confidenceLabel": "high",
     "verificationMode": "INDEPENDENTLY_VERIFIED",
-    "analysisSummary": "Confirmed by tracing the manual-worker branch in `/team shutdown`. Non-RPC workers that own in-progress tasks hit a `continue` before the shutdown_request mailbox write, so they are skipped entirely. The command then emits the generic 'all teammates stopped' success message, which is false for supported manual workers started via `/team env`.",
-    "suggestedFix": "Always send shutdown_request to manual workers; only skip the forced offline state update for active in-progress owners, and surface a follow-up warning that shutdown is still pending for them."
+    "analysisSummary": "Confirmed by tracing the new cleanup suppression logic. After `/team cleanup`, refresh refused to recreate config.json even after fresh task/worker state reappeared. That left the session in a partially rebuilt team state with missing config-driven behavior.",
+    "suggestedFix": "Allow config bootstrap to resume automatically once new tasks or teammates exist, and clear the suppression flag when config has been re-established."
   }
 ]

@@ -1,0 +1,153 @@
+{
+  "generatedAt": "2026-03-12T02:49:49.577Z",
+  "target": "/Users/codex/Projects/pi-agent-teams",
+  "totalFiles": 42,
+  "scannableFiles": 40,
+  "strategy": "parallel",
+  "modeFile": "modes/parallel.md",
+  "needsLoop": false,
+  "fileBudget": 60,
+  "avgLines": 269,
+  "avgTokensPerFile": 1076,
+  "estimatedTotalLines": 11298,
+  "sampledFiles": 30,
+  "domains": [
+    {
+      "path": "extensions",
+      "tier": "HIGH",
+      "fileCount": 39,
+      "riskBreakdown": {
+        "critical": 0,
+        "high": 3,
+        "medium": 36,
+        "low": 0,
+        "context-only": 0
+      }
+    },
+    {
+      "path": ".",
+      "tier": "MEDIUM",
+      "fileCount": 1,
+      "riskBreakdown": {
+        "critical": 0,
+        "high": 0,
+        "medium": 1,
+        "low": 0,
+        "context-only": 0
+      }
+    },
+    {
+      "path": "scripts",
+      "tier": "MEDIUM",
+      "fileCount": 2,
+      "riskBreakdown": {
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 1,
+        "context-only": 1
+      }
+    }
+  ],
+  "scanOrder": [
+    "extensions/teams/model-policy.ts",
+    "extensions/teams/task-store.ts",
+    "extensions/teams/worker.ts",
+    "eslint.config.js",
+    "extensions/teams/activity-tracker.ts",
+    "extensions/teams/adaptive-polling.ts",
+    "extensions/teams/cleanup.ts",
+    "extensions/teams/debounce.ts",
+    "extensions/teams/doctor.ts",
+    "extensions/teams/event-log.ts",
+    "extensions/teams/fs-lock.ts",
+    "extensions/teams/heartbeat-lease.ts",
+    "extensions/teams/hooks.ts",
+    "extensions/teams/index.ts",
+    "extensions/teams/leader-attach-commands.ts",
+    "extensions/teams/leader-inbox.ts",
+    "extensions/teams/leader-info-commands.ts",
+    "extensions/teams/leader-lifecycle-commands.ts",
+    "extensions/teams/leader-messaging-commands.ts",
+    "extensions/teams/leader-plan-commands.ts",
+    "extensions/teams/leader-spawn-command.ts",
+    "extensions/teams/leader-task-commands.ts",
+    "extensions/teams/leader-team-command.ts",
+    "extensions/teams/leader-teams-tool.ts",
+    "extensions/teams/leader.ts",
+    "extensions/teams/mailbox.ts",
+    "extensions/teams/max-workers-policy.ts",
+    "extensions/teams/names.ts",
+    "extensions/teams/paths.ts",
+    "extensions/teams/protocol.ts",
+    "extensions/teams/spawn-types.ts",
+    "extensions/teams/team-attach-claim.ts",
+    "extensions/teams/team-config.ts",
+    "extensions/teams/team-discovery.ts",
+    "extensions/teams/teammate-rpc.ts",
+    "extensions/teams/teams-panel.ts",
+    "extensions/teams/teams-style.ts",
+    "extensions/teams/teams-ui-shared.ts",
+    "extensions/teams/teams-widget.ts",
+    "extensions/teams/worktree.ts"
+  ],
+  "tokenEstimate": {
+    "recon": 840,
+    "perHunterChunk": 43040,
+    "totalPipeline": 51880
+  },
+  "recommendations": [],
+  "riskMap": {
+    "critical": [],
+    "high": [
+      "extensions/teams/model-policy.ts",
+      "extensions/teams/task-store.ts",
+      "extensions/teams/worker.ts"
+    ],
+    "medium": [
+      "eslint.config.js",
+      "extensions/teams/activity-tracker.ts",
+      "extensions/teams/adaptive-polling.ts",
+      "extensions/teams/cleanup.ts",
+      "extensions/teams/debounce.ts",
+      "extensions/teams/doctor.ts",
+      "extensions/teams/event-log.ts",
+      "extensions/teams/fs-lock.ts",
+      "extensions/teams/heartbeat-lease.ts",
+      "extensions/teams/hooks.ts",
+      "extensions/teams/index.ts",
+      "extensions/teams/leader-attach-commands.ts",
+      "extensions/teams/leader-inbox.ts",
+      "extensions/teams/leader-info-commands.ts",
+      "extensions/teams/leader-lifecycle-commands.ts",
+      "extensions/teams/leader-messaging-commands.ts",
+      "extensions/teams/leader-plan-commands.ts",
+      "extensions/teams/leader-spawn-command.ts",
+      "extensions/teams/leader-task-commands.ts",
+      "extensions/teams/leader-team-command.ts",
+      "extensions/teams/leader-teams-tool.ts",
+      "extensions/teams/leader.ts",
+      "extensions/teams/mailbox.ts",
+      "extensions/teams/max-workers-policy.ts",
+      "extensions/teams/names.ts",
+      "extensions/teams/paths.ts",
+      "extensions/teams/protocol.ts",
+      "extensions/teams/spawn-types.ts",
+      "extensions/teams/team-attach-claim.ts",
+      "extensions/teams/team-config.ts",
+      "extensions/teams/team-discovery.ts",
+      "extensions/teams/teammate-rpc.ts",
+      "extensions/teams/teams-panel.ts",
+      "extensions/teams/teams-style.ts",
+      "extensions/teams/teams-ui-shared.ts",
+      "extensions/teams/teams-widget.ts",
+      "extensions/teams/worktree.ts"
+    ],
+    "low": [
+      "scripts/lib/pi-workers.ts"
+    ],
+    "context-only": [
+      "scripts/e2e-rpc-test.mjs"
+    ]
+  }
+}

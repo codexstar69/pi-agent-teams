@@ -1,20 +1,20 @@
 [
   {
-    "bugId": "BUG-10",
+    "bugId": "BUG-13",
     "response": "ACCEPT",
-    "analysisSummary": "Accepted. The stop() path cannot reach its SIGKILL escalation. The timer reads `this.proc` after it has been nulled, and even without that, Node's `ChildProcess.killed` only reports that a signal was delivered, not that the child exited.",
-    "counterEvidence": "Node child_process docs: `subprocess.killed` becomes true after `kill()` successfully sends a signal; it does not mean the process terminated."
+    "analysisSummary": "Accepted. The child is spawned before the ready handshake, and the failure path only throws. The caller removes bookkeeping but does not terminate the already-started child process.",
+    "counterEvidence": "leader.ts catch block after `await t.start(...)` only executes `teammates.delete(name)` and returns an error."
   },
   {
-    "bugId": "BUG-11",
+    "bugId": "BUG-14",
     "response": "ACCEPT",
-    "analysisSummary": "Accepted. The cleanup command deletes the active team directory and then refreshes leader state through a code path that auto-bootstraps missing config.json back into existence. That directly defeats the cleanup operation.",
-    "counterEvidence": "leader.ts refreshTasks() recreates config.json with ensureTeamConfig() whenever loadTeamConfig() returns null."
+    "analysisSummary": "Accepted. stop() performs a cooperative RPC abort first, but that RPC call uses the normal send timeout. An unresponsive child therefore delays termination instead of being signalled immediately.",
+    "counterEvidence": "`send()` defaults to 60_000ms; stop() awaited `this.abort()` before signalling the process."
   },
   {
-    "bugId": "BUG-12",
+    "bugId": "BUG-15",
     "response": "ACCEPT",
-    "analysisSummary": "Accepted. The manual-worker shutdown loop skips active in-progress owners before it writes the shutdown mailbox message, so those workers are not merely left online in the UI—they are never asked to shut down at all.",
-    "counterEvidence": "The `continue` on `inProgressOwners.has(m.name)` executes before the shutdown_request mailbox write."
+    "analysisSummary": "Accepted. The cleanup suppression condition ignored whether fresh task/worker state had reappeared, so the leader could remain config-less even after deliberate reinitialization activity.",
+    "counterEvidence": "The suppressed branch returned null unconditionally while tasks and teammates were not consulted."
   }
 ]

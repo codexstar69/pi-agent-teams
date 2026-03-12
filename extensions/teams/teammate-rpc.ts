@@ -7,6 +7,28 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function scheduleForceTerminate(proc: ReturnType<typeof spawn>, graceMs = 1_000): void {
+	try {
+		proc.kill("SIGTERM");
+	} catch {
+		// ignore
+	}
+
+	const killTimer = setTimeout(() => {
+		if (proc.exitCode !== null || proc.signalCode !== null) return;
+		try {
+			proc.kill("SIGKILL");
+		} catch {
+			// ignore
+		}
+	}, graceMs);
+	proc.once("close", () => clearTimeout(killTimer));
+}
+
 export type TeammateStatus = "starting" | "idle" | "streaming" | "stopped" | "error";
 
 type RpcCommand =
@@ -174,6 +196,9 @@ export class TeammateRpc {
 		} catch (err) {
 			this.status = "error";
 			this.lastError = err instanceof Error ? err.message : String(err);
+			const proc = this.proc;
+			if (proc) scheduleForceTerminate(proc);
+			this.proc = null;
 			throw new Error(`Teammate RPC ready handshake failed for ${this.name}: ${this.lastError}`);
 		}
 	}
@@ -181,27 +206,16 @@ export class TeammateRpc {
 	async stop(): Promise<void> {
 		const proc = this.proc;
 		if (!proc) return;
+
+		// Best-effort cooperative abort, but do not let an unresponsive RPC child delay
+		// process termination for the full request timeout.
 		try {
-			await this.abort();
-		} catch {
-			// ignore
-		}
-		try {
-			proc.kill("SIGTERM");
+			await Promise.race([this.abort().catch(() => undefined), sleep(500)]);
 		} catch {
 			// ignore
 		}
 
-		const killTimer = setTimeout(() => {
-			if (proc.exitCode !== null || proc.signalCode !== null) return;
-			try {
-				proc.kill("SIGKILL");
-			} catch {
-				// ignore
-			}
-		}, 1000);
-		proc.once("close", () => clearTimeout(killTimer));
-
+		scheduleForceTerminate(proc);
 		this.proc = null;
 		this.status = "stopped";
 	}

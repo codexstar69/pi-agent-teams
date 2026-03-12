@@ -1,52 +1,53 @@
 [
   {
-    "bugId": "BUG-10",
+    "bugId": "BUG-13",
     "severity": "Medium",
     "category": "error-handling",
     "file": "extensions/teams/teammate-rpc.ts",
-    "lines": "181-192",
-    "claim": "TeammateRpc.stop() cannot execute its SIGKILL fallback. After sending SIGTERM it immediately nulls this.proc, and the timer also checks proc.killed, which Node sets true once a signal was sent, not once the process exited. A stubborn child can survive stop()/kill/shutdown indefinitely.",
-    "evidence": "teammate-rpc.ts:188-192 sends SIGTERM, schedules `if (this.proc && !this.proc.killed) this.proc.kill(\"SIGKILL\")`, then immediately sets `this.proc = null`. Per Node docs, ChildProcess.killed only means a signal was successfully delivered, not that the child terminated.",
-    "runtimeTrigger": "A worker process wedges or ignores SIGTERM. The leader calls /team kill, /team shutdown, or stopAllTeammates(). The SIGKILL escalation never fires, so the child process remains alive while the leader thinks it was stopped.",
+    "lines": "128-177",
+    "claim": "A teammate process that launches but fails the initial RPC ready handshake is leaked. `start()` spawns the child before awaiting `get_state`, but on handshake failure it only throws; the caller removes the teammate from the map without terminating the child process.",
+    "evidence": "teammate-rpc.ts:128-177 spawns `pi`, then awaits `this.send({ type: \"get_state\" })`. On error it sets status/lastError and throws. leader.ts:607-623 catches that error and only `teammates.delete(name)`; there is no child termination path.",
+    "runtimeTrigger": "The child process starts but does not respond to the ready handshake in time (slow startup, broken RPC mode, partial extension init). `/team spawn` reports failure, but the orphan worker process continues running in the background and can still touch team state.",
+    "crossReferences": [
+      "extensions/teams/leader.ts:607-623"
+    ],
+    "confidenceScore": 96,
+    "confidenceLabel": "high",
+    "stride": "N/A",
+    "cwe": "N/A"
+  },
+  {
+    "bugId": "BUG-14",
+    "severity": "Medium",
+    "category": "error-handling",
+    "file": "extensions/teams/teammate-rpc.ts",
+    "lines": "183-194",
+    "claim": "`TeammateRpc.stop()` waits for a full RPC abort round-trip before sending SIGTERM. If the child is wedged and not answering RPC, stop/kill/shutdown can stall for the 60s send timeout per worker before process termination even begins.",
+    "evidence": "teammate-rpc.ts:183-194 does `await this.abort()` before signalling the process. `abort()` calls `send()`, whose default timeout is 60_000ms. Hung children therefore block shutdown on the RPC timeout path.",
+    "runtimeTrigger": "A worker is alive but its RPC loop is unresponsive. The leader runs `/team kill`, `/team shutdown`, or switches session. Each stuck worker can hold teardown for ~60 seconds before SIGTERM/SIGKILL is attempted.",
     "crossReferences": [
       "extensions/teams/leader-lifecycle-commands.ts:495-508",
       "extensions/teams/leader.ts:93-118"
     ],
-    "confidenceScore": 98,
+    "confidenceScore": 97,
     "confidenceLabel": "high",
     "stride": "N/A",
     "cwe": "N/A"
   },
   {
-    "bugId": "BUG-11",
+    "bugId": "BUG-15",
     "severity": "Medium",
     "category": "logic",
-    "file": "extensions/teams/leader-lifecycle-commands.ts",
-    "lines": "236-249",
-    "claim": "`/team cleanup` deletes the active team directory and then immediately calls refreshTasks(), whose leader-side bootstrap path recreates config.json when it is missing. The cleanup command therefore resurrects the team state it just removed, so cleanup is not persistent.",
-    "evidence": "leader-lifecycle-commands.ts:241-249 calls cleanupTeamDir(...) and then refreshTasks(). leader.ts:447-456 loads config and falls back to ensureTeamConfig(...) when config.json is missing, recreating the team directory on the next refresh.",
-    "runtimeTrigger": "Leader runs `/team cleanup --force` on the active team. The directory is removed, but the post-cleanup refresh (and subsequent background refresh loop) recreates config.json immediately, so the supposedly deleted team artifacts reappear.",
+    "file": "extensions/teams/leader.ts",
+    "lines": "439-458",
+    "claim": "The cleanup bootstrap suppression introduced for `/team cleanup` over-suppresses config recreation. After cleanup, if the user intentionally creates new task state before config exists (for example `/team task add`), refresh still refuses to recreate config.json, leaving the team in a partially reinitialized state with tasks but no config.",
+    "evidence": "leader.ts:449-458 short-circuits to `nextConfig = null` whenever the current team is in `suppressedConfigBootstrapTeams`, regardless of whether new tasks or teammates now exist. Commands like task creation can recreate task files without recreating config.",
+    "runtimeTrigger": "Leader runs `/team cleanup`, then immediately uses the same session to add a task or recreate activity. Task files can reappear, but team config remains absent and UI/commands that depend on config behave inconsistently until another command explicitly bootstraps config.",
     "crossReferences": [
-      "extensions/teams/leader.ts:439-456"
+      "extensions/teams/leader-lifecycle-commands.ts:236-249",
+      "extensions/teams/leader-task-commands.ts:153-178"
     ],
-    "confidenceScore": 95,
-    "confidenceLabel": "high",
-    "stride": "N/A",
-    "cwe": "N/A"
-  },
-  {
-    "bugId": "BUG-12",
-    "severity": "Medium",
-    "category": "logic",
-    "file": "extensions/teams/leader-lifecycle-commands.ts",
-    "lines": "373-410",
-    "claim": "`/team shutdown` skips manual non-RPC workers that currently own in-progress tasks. Because the loop `continue`s before sending any shutdown_request, those workers keep running even though the command reports that all teammates were stopped.",
-    "evidence": "leader-lifecycle-commands.ts:379-383 skips manual workers when `inProgressOwners.has(m.name)`, and the shutdown_request mailbox write happens only after that branch. The final notify at 410 still says all teammates stopped.",
-    "runtimeTrigger": "A tmux/manual worker launched via `/team env` is online and owns an in-progress task. The leader runs `/team shutdown`. RPC workers stop, but the manual worker receives no shutdown_request and keeps running while the UI claims shutdown completed.",
-    "crossReferences": [
-      "extensions/teams/leader-info-commands.ts:72-108"
-    ],
-    "confidenceScore": 93,
+    "confidenceScore": 91,
     "confidenceLabel": "high",
     "stride": "N/A",
     "cwe": "N/A"

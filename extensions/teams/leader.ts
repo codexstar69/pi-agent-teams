@@ -447,16 +447,18 @@ export function runLeader(pi: ExtensionAPI): void {
 
 		const [nextTasks, cfg] = await Promise.all([listTasks(teamDir, effectiveTaskListId), loadTeamConfig(teamDir)]);
 		const bootstrapSuppressed = suppressedConfigBootstrapTeams.has(currentTeamId);
+		const shouldBootstrapConfig = !bootstrapSuppressed || nextTasks.length > 0 || teammates.size > 0;
 		const nextConfig =
 			cfg ??
-			(bootstrapSuppressed
-				? null
-				: await ensureTeamConfig(teamDir, {
+			(shouldBootstrapConfig
+				? await ensureTeamConfig(teamDir, {
 					teamId: currentTeamId,
 					taskListId: effectiveTaskListId,
 					leadName: "team-lead",
 					style,
-				}));
+				})
+				: null);
+		if (nextConfig) suppressedConfigBootstrapTeams.delete(currentTeamId);
 		const nextStyle = nextConfig?.style ?? style;
 		const nextStateKey = JSON.stringify({
 			tasks: nextTasks.map((task) => ({
