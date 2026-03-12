@@ -6,6 +6,8 @@
 
 An experimental [Pi](https://pi.dev) extension that brings [Claude Code agent teams](https://code.claude.com/docs/en/agent-teams) to Pi. Spawn teammates, share a task list, and coordinate work across multiple Pi sessions.
 
+![pi-agent-teams product overview](docs/assets/github-hero-triptych.png)
+
 > **Status:** MVP with hardened runtime behavior, multi-OS verification, PowerShell/Windows support paths, and a maintained package surface. See [`docs/claude-parity.md`](docs/claude-parity.md) for roadmap context.
 
 ## Project health
