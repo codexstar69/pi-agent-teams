@@ -67,6 +67,8 @@ import {
 	runTeamsHook,
 	shouldCreateHookFollowupTask,
 	shouldReopenTaskOnHookFailure,
+	resolveHookCommand,
+	resolvePowerShellCommand,
 } from "../extensions/teams/hooks.js";
 import { listDiscoveredTeams } from "../extensions/teams/team-discovery.js";
 import {
@@ -77,6 +79,8 @@ import {
 } from "../extensions/teams/team-attach-claim.js";
 import { getTeamHelpText } from "../extensions/teams/leader-team-command.js";
 import { buildTaskShowLines } from "../extensions/teams/leader-task-commands.js";
+import { buildTeamEnvOutput } from "../extensions/teams/leader-info-commands.js";
+import { createProcessTerminationPlan } from "../extensions/teams/process-control.js";
 import {
 	TEAM_MAILBOX_NS,
 	isIdleNotification,
@@ -284,7 +288,55 @@ assertEq(
 	"leader inbox delay backs off while idle",
 );
 
-console.log("\n1e. debounce");
+console.log("\n1e. windows portability helpers");
+{
+	const envOutput = buildTeamEnvOutput({
+		teamId: "team-123",
+		taskListId: "tasks-123",
+		leadName: "team-lead",
+		style: "normal",
+		teamsRoot: "/tmp/pi teams",
+		teamDir: "/tmp/pi teams/team-123",
+		agentName: "alice",
+		autoClaim: "1",
+		teamsEntry: "/repo/extensions/teams/index.ts",
+		shellQuote: (value) => `'${value}'`,
+	});
+	assert(envOutput.includes("PowerShell (Windows):"), "team env output includes PowerShell instructions");
+	assert(envOutput.includes("$env:PI_TEAMS_TEAM_ID = 'team-123'"), "team env output formats PowerShell env assignment");
+	assert(envOutput.includes("POSIX shell (macOS/Linux):"), "team env output keeps POSIX instructions");
+
+	assertEq(resolvePowerShellCommand({ platform: "win32" }), "powershell.exe", "Windows hook resolution uses powershell.exe by default");
+	assertEq(resolvePowerShellCommand({ platform: "darwin" }), "pwsh", "non-Windows hook resolution prefers pwsh");
+	assertEq(resolvePowerShellCommand({ platform: "win32", env: { PI_TEAMS_POWERSHELL: "C:/pwsh.exe" } }), "C:/pwsh.exe", "PowerShell command honors explicit override");
+
+	const psHooksDir = path.join(tmpRoot, "ps-hooks");
+	fs.mkdirSync(psHooksDir, { recursive: true });
+	const psHookPath = path.join(psHooksDir, "on_task_completed.ps1");
+	fs.writeFileSync(psHookPath, "Write-Output 'ok'\n", "utf8");
+	const psHook = resolveHookCommand(psHooksDir, "task_completed", { platform: "win32" });
+	assert(psHook !== null, "PowerShell hook resolves on Windows");
+	assertEq(psHook?.cmd, "powershell.exe", "PowerShell hook uses powershell.exe command");
+	assertEq(psHook?.args.at(-1), psHookPath, "PowerShell hook targets the .ps1 file");
+
+	const winPlan = createProcessTerminationPlan({ platform: "win32", pid: 4242 });
+	assertEq(winPlan.graceful?.kind, "exec", "Windows process termination uses taskkill for graceful step");
+	assertEq(winPlan.force?.kind, "exec", "Windows process termination uses taskkill for force step");
+	if (winPlan.force?.kind === "exec") {
+		assertEq(winPlan.force.args.join(" "), "/pid 4242 /T /F", "Windows force termination kills process tree");
+	}
+
+	const posixPlan = createProcessTerminationPlan({ platform: "darwin", pid: 4242 });
+	assertEq(posixPlan.graceful?.kind, "signal", "POSIX process termination uses signals for graceful step");
+	if (posixPlan.graceful?.kind === "signal") {
+		assertEq(posixPlan.graceful.signal, "SIGTERM", "POSIX graceful termination uses SIGTERM");
+	}
+	if (posixPlan.force?.kind === "signal") {
+		assertEq(posixPlan.force.signal, "SIGKILL", "POSIX force termination uses SIGKILL");
+	}
+}
+
+console.log("\n1f. debounce");
 {
 	let fireCount = 0;
 	const trigger = createDebouncedTrigger(() => {
@@ -1301,7 +1353,12 @@ console.log("\n11. docs/help drift guard");
 		assert(readme.includes("task view: `c` complete"), "README mentions panel task mutations");
 		assert(readme.includes("`r` reassign"), "README mentions panel task reassignment");
 		assert(readme.includes("_styles"), "README mentions _styles directory");
+		assert(readme.includes("PowerShell (Windows)"), "README documents PowerShell worker env instructions");
+		assert(readme.includes("start-team-windows.ps1"), "README mentions Windows launcher script");
 	}
+
+	const windowsLauncherPath = path.join(process.cwd(), "scripts", "start-team-windows.ps1");
+	assert(fs.existsSync(windowsLauncherPath), "Windows launcher script exists");
 }
 
 // ── summary ──────────────────────────────────────────────────────────

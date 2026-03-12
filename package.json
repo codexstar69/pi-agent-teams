@@ -40,7 +40,9 @@
     "integration-cleanup-worktree-plan-test": "tsx scripts/integration-cleanup-worktree-plan-test.mts",
     "integration-git-worktree-cleanup-helper-test": "tsx scripts/integration-git-worktree-cleanup-helper-test.mts",
     "integration-git-worktree-cleanup-test": "tsx scripts/integration-git-worktree-cleanup-test.mts",
-    "integration-team-doctor-test": "tsx scripts/integration-team-doctor-test.mts"
+    "integration-team-doctor-test": "tsx scripts/integration-team-doctor-test.mts",
+    "start-team:tmux": "bash scripts/start-tmux-team.sh",
+    "start-team:windows": "powershell -ExecutionPolicy Bypass -File scripts/start-team-windows.ps1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",

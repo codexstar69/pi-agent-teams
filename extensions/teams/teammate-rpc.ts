@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type { AgentEvent } from "@mariozechner/pi-agent-core";
+import { scheduleProcessTermination } from "./process-control.js";
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
 	if (!value) return fallback;
@@ -9,24 +10,6 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function scheduleForceTerminate(proc: ReturnType<typeof spawn>, graceMs = 1_000): void {
-	try {
-		proc.kill("SIGTERM");
-	} catch {
-		// ignore
-	}
-
-	const killTimer = setTimeout(() => {
-		if (proc.exitCode !== null || proc.signalCode !== null) return;
-		try {
-			proc.kill("SIGKILL");
-		} catch {
-			// ignore
-		}
-	}, graceMs);
-	proc.once("close", () => clearTimeout(killTimer));
 }
 
 export type TeammateStatus = "starting" | "idle" | "streaming" | "stopped" | "error";
@@ -197,7 +180,7 @@ export class TeammateRpc {
 			this.status = "error";
 			this.lastError = err instanceof Error ? err.message : String(err);
 			const proc = this.proc;
-			if (proc) scheduleForceTerminate(proc);
+			if (proc) scheduleProcessTermination(proc);
 			this.proc = null;
 			throw new Error(`Teammate RPC ready handshake failed for ${this.name}: ${this.lastError}`);
 		}
@@ -215,7 +198,7 @@ export class TeammateRpc {
 			// ignore
 		}
 
-		scheduleForceTerminate(proc);
+		scheduleProcessTermination(proc);
 		this.proc = null;
 		this.status = "stopped";
 	}

@@ -209,7 +209,7 @@ All management commands live under `/team`.
 | `/team cleanup [--force]` | Delete team artifacts |
 | `/team doctor` | Read-only diagnostics for stale workers, locks, and managed worktrees |
 | `/team id` | Print team/task-list IDs and paths |
-| `/team env <name>` | Print env vars to start a manual teammate |
+| `/team env <name>` | Print manual-worker startup instructions for both POSIX shells (macOS/Linux) and PowerShell (Windows) |
 
 Model inheritance note:
 
@@ -292,9 +292,9 @@ Then create hook scripts under:
 
 Recognized hook names:
 
-- `on_idle.(js|mjs|sh)`
-- `on_task_completed.(js|mjs|sh)`
-- `on_task_failed.(js|mjs|sh)`
+- `on_idle.(js|mjs|sh|ps1)`
+- `on_task_completed.(js|mjs|sh|ps1)`
+- `on_task_failed.(js|mjs|sh|ps1)`
 
 Hooks run with working directory = the **leader session cwd** and receive context via env vars:
 
@@ -386,7 +386,7 @@ Deterministic leader-side integration flow that verifies failed `on_task_complet
 - follow-up task is created/assigned when policy includes `followup`
 - remediation mailbox nudge is emitted for the responsible teammate
 
-### tmux dogfooding
+### tmux dogfooding (macOS/Linux)
 
 ```bash
 ./scripts/start-tmux-team.sh pi-teams alice bob
@@ -394,6 +394,18 @@ tmux attach -t pi-teams
 ```
 
 Starts a leader + one tmux window per teammate for interactive testing.
+
+### PowerShell launcher (Windows)
+
+`/team env <name>` now prints both POSIX shell and PowerShell (Windows) startup instructions for manual workers.
+
+For a multi-window local dogfooding setup on Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start-team-windows.ps1 pi-teams alice bob
+```
+
+This opens a leader window plus one PowerShell window per teammate using the same filesystem-backed team primitives.
 
 ## License
 

@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
+import { scheduleProcessTermination } from "./process-control.js";
 import { getTeamsHooksDir } from "./paths.js";
 import type { TeamTask } from "./task-store.js";
 
@@ -170,11 +171,26 @@ export function getHookBaseName(event: TeamsHookEvent): string {
 
 type HookCommand = { cmd: string; args: string[]; hookPath: string; display: readonly string[] };
 
-function resolveHookCommand(hooksDir: string, event: TeamsHookEvent): HookCommand | null {
+export function resolvePowerShellCommand(opts: {
+	platform?: NodeJS.Platform;
+	env?: NodeJS.ProcessEnv;
+} = {}): string {
+	const env = opts.env ?? process.env;
+	const override = env.PI_TEAMS_POWERSHELL?.trim();
+	if (override) return override;
+	return (opts.platform ?? process.platform) === "win32" ? "powershell.exe" : "pwsh";
+}
+
+export function resolveHookCommand(
+	hooksDir: string,
+	event: TeamsHookEvent,
+	opts: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv } = {},
+): HookCommand | null {
 	const base = getHookBaseName(event);
 	const candidates = [
 		path.join(hooksDir, base),
 		path.join(hooksDir, `${base}.sh`),
+		path.join(hooksDir, `${base}.ps1`),
 		path.join(hooksDir, `${base}.js`),
 		path.join(hooksDir, `${base}.mjs`),
 	];
@@ -192,6 +208,16 @@ function resolveHookCommand(hooksDir: string, event: TeamsHookEvent): HookComman
 
 			if (ext === ".sh") {
 				return { cmd: "bash", args: [file], hookPath: file, display: ["bash", file] };
+			}
+
+			if (ext === ".ps1") {
+				const powerShell = resolvePowerShellCommand(opts);
+				return {
+					cmd: powerShell,
+					args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", file],
+					hookPath: file,
+					display: [powerShell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", file],
+				};
 			}
 
 			if (isExecutable(st)) {
@@ -234,18 +260,7 @@ async function runWithTimeout(opts: {
 
 		const timeout = setTimeout(() => {
 			timedOut = true;
-			try {
-				child.kill("SIGTERM");
-			} catch {
-				// ignore
-			}
-			setTimeout(() => {
-				try {
-					child.kill("SIGKILL");
-				} catch {
-					// ignore
-				}
-			}, 1000);
+			scheduleProcessTermination(child);
 		}, opts.timeoutMs);
 
 		child.on("close", (code) => {

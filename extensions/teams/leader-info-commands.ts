@@ -6,6 +6,77 @@ import type { TeamConfig, TeamMember } from "./team-config.js";
 import type { TeamsStyle } from "./teams-style.js";
 import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
 
+function powerShellQuote(value: string): string {
+	return `'${value.replace(/'/g, "''")}'`;
+}
+
+function buildPiCommandParts(teamsEntry: string | null): string[] {
+	const parts = ["pi"];
+	if (teamsEntry) parts.push("--no-extensions", "-e", teamsEntry);
+	return parts;
+}
+
+export function buildTeamEnvOutput(opts: {
+	teamId: string;
+	taskListId: string;
+	leadName: string;
+	style: TeamsStyle;
+	teamsRoot: string;
+	teamDir: string;
+	agentName: string;
+	autoClaim: string;
+	teamsEntry: string | null;
+	shellQuote: (value: string) => string;
+}): string {
+	const env: Record<string, string> = {
+		PI_TEAMS_ROOT_DIR: opts.teamsRoot,
+		PI_TEAMS_WORKER: "1",
+		PI_TEAMS_TEAM_ID: opts.teamId,
+		PI_TEAMS_TASK_LIST_ID: opts.taskListId,
+		PI_TEAMS_AGENT_NAME: opts.agentName,
+		PI_TEAMS_LEAD_NAME: opts.leadName,
+		PI_TEAMS_STYLE: opts.style,
+		PI_TEAMS_AUTO_CLAIM: opts.autoClaim,
+	};
+	const piCommandParts = buildPiCommandParts(opts.teamsEntry);
+
+	const posixExports = Object.entries(env)
+		.map(([key, value]) => `export ${key}=${opts.shellQuote(value)}`)
+		.join("\n");
+	const posixRun = Object.entries(env)
+		.map(([key, value]) => `${key}=${opts.shellQuote(value)}`)
+		.concat(piCommandParts.map((part) => opts.shellQuote(part)))
+		.join(" ");
+
+	const powerShellExports = Object.entries(env)
+		.map(([key, value]) => `$env:${key} = ${powerShellQuote(value)}`)
+		.join("\n");
+	const powerShellRun = Object.entries(env)
+		.map(([key, value]) => `$env:${key} = ${powerShellQuote(value)}`)
+		.concat(`& ${piCommandParts.map((part) => powerShellQuote(part)).join(" ")}`)
+		.join("; ");
+
+	return [
+		`teamId: ${opts.teamId}`,
+		`taskListId: ${opts.taskListId}`,
+		`leadName: ${opts.leadName}`,
+		`teamsRoot: ${opts.teamsRoot}`,
+		`teamDir: ${opts.teamDir}`,
+		"",
+		"POSIX shell (macOS/Linux):",
+		posixExports,
+		"",
+		"Run:",
+		posixRun,
+		"",
+		"PowerShell (Windows):",
+		powerShellExports,
+		"",
+		"Run:",
+		powerShellRun,
+	].join("\n");
+}
+
 export async function handleTeamListCommand(opts: {
 	ctx: ExtensionCommandContext;
 	teammates: Map<string, TeammateRpc>;
@@ -99,42 +170,19 @@ export async function handleTeamEnvCommand(opts: {
 	const autoClaim = (process.env.PI_TEAMS_DEFAULT_AUTO_CLAIM ?? "1") === "1" ? "1" : "0";
 
 	const teamsEntry = getTeamsExtensionEntryPath();
-	const piCmd = teamsEntry ? `pi --no-extensions -e ${shellQuote(teamsEntry)}` : "pi";
-
-	const env: Record<string, string> = {
-		PI_TEAMS_ROOT_DIR: teamsRoot,
-		PI_TEAMS_WORKER: "1",
-		PI_TEAMS_TEAM_ID: teamId,
-		PI_TEAMS_TASK_LIST_ID: effectiveTlId,
-		PI_TEAMS_AGENT_NAME: name,
-		PI_TEAMS_LEAD_NAME: leadName,
-		PI_TEAMS_STYLE: style,
-		PI_TEAMS_AUTO_CLAIM: autoClaim,
-	};
-
-	const exportLines = Object.entries(env)
-		.map(([k, v]) => `export ${k}=${shellQuote(v)}`)
-		.join("\n");
-
-	const oneLiner = Object.entries(env)
-		.map(([k, v]) => `${k}=${shellQuote(v)}`)
-		.join(" ")
-		.concat(` ${piCmd}`);
-
 	ctx.ui.notify(
-		[
-			`teamId: ${teamId}`,
-			`taskListId: ${effectiveTlId}`,
-			`leadName: ${leadName}`,
-			`teamsRoot: ${teamsRoot}`,
-			`teamDir: ${teamDir}`,
-			"",
-			"Env (copy/paste):",
-			exportLines,
-			"",
-			"Run:",
-			oneLiner,
-		].join("\n"),
+		buildTeamEnvOutput({
+			teamId,
+			taskListId: effectiveTlId,
+			leadName,
+			style,
+			teamsRoot,
+			teamDir,
+			agentName: name,
+			autoClaim,
+			teamsEntry,
+			shellQuote,
+		}),
 		"info",
 	);
 }
